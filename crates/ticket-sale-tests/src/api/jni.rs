@@ -16,7 +16,7 @@ use tokio::sync::oneshot;
 use tokio::task::{self, JoinHandle};
 use uuid::Uuid;
 
-use super::{Api, RequestMsg, Response};
+use super::{check_send_result, Api, RequestMsg, Response};
 
 // spell-checker:ignore jboolean,jbyte,jint,jlong,jstring
 
@@ -311,7 +311,7 @@ extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithError<'lo
         server_id,
         customer_id,
     };
-    response_channel.send(response).unwrap();
+    check_send_result(response_channel.send(response));
 }
 
 #[no_mangle]
@@ -340,7 +340,7 @@ extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithInt<'loca
         server_id,
         customer_id,
     };
-    response_channel.send(response).unwrap();
+    check_send_result(response_channel.send(response));
 }
 
 #[no_mangle]
@@ -361,7 +361,7 @@ extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithSoldOut<'
         server_id: Some(server_id),
         customer_id,
     };
-    response_channel.send(response).unwrap();
+    check_send_result(response_channel.send(response));
 }
 
 #[no_mangle]
@@ -389,7 +389,7 @@ extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithServerIds
         }
     }
 
-    response_channel.send(Response::ServerList(ids)).unwrap();
+    check_send_result(response_channel.send(Response::ServerList(ids)));
 }
 
 #[no_mangle]

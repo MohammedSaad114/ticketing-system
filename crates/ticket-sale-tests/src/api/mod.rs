@@ -378,3 +378,9 @@ pub struct RequestOptions {
     pub server_id: Option<Uuid>,
     pub customer_id: Option<Uuid>,
 }
+
+fn check_send_result<T: std::fmt::Debug>(result: Result<(), T>) {
+    if let Err(err) = result {
+        eprintln!("WARNING: Tester did not await response `{err:?}`");
+    }
+}

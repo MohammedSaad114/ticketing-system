@@ -165,6 +165,8 @@ struct DropBomb;
 
 impl Drop for DropBomb {
     fn drop(&mut self) {
-        eprintln!("@TestAuthor: You should call `ctx.finish().await` to shut the ticket sales system down");
+        if !std::thread::panicking() {
+            eprintln!("@TestAuthor: You should call `ctx.finish().await` to shut the ticket sales system down");
+        }
     }
 }

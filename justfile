@@ -4,7 +4,7 @@ set positional-arguments
 help:
     @just --list
 
-lang := `python3 -c 'import tomllib;print(tomllib.load(open("project.toml","rb"))["language"])' || echo java`
+lang := `python3 -c 'import tomllib;print(tomllib.loads(open("project.toml","r",encoding="utf-8-sig").read())["language"])' || echo java`
 export CP_LANGUAGE := lang
 
 build_command := if lang != "rust" { "./gradlew jar" } else { "cargo build" }

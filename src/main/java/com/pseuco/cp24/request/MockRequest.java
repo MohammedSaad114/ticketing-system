@@ -17,7 +17,7 @@ public class MockRequest extends Request {
     /**
      * Pointer to the FFI response object.
      */
-    private final long responsePtr;
+    private long responsePtr;
 
     /**
      * Mock request body.
@@ -80,7 +80,10 @@ public class MockRequest extends Request {
     }
 
     @Override
-    public void respondWithError(final String message) {
+    public synchronized void respondWithError(final String message) {
+        if (this.responsePtr == 0)
+            throw new RuntimeException("A request must not be answered twice");
+
         long serverL = 0;
         long serverM = 0;
         if (this.serverId.isPresent()) {
@@ -92,13 +95,18 @@ public class MockRequest extends Request {
         final long customerL = cid.getLeastSignificantBits();
         final long customerM = cid.getMostSignificantBits();
         respondWithError(this.responsePtr, message, this.serverId.isPresent(), serverL, serverM, customerL, customerM);
+
+        this.responsePtr = 0;
     }
 
     private static native void respondWithError(long responsePtr, String msg, boolean hasServerId, long serverL,
             long serverM, long customerL, long customerM);
 
     @Override
-    public void respondWithInt(final int integer) {
+    public synchronized void respondWithInt(final int integer) {
+        if (this.responsePtr == 0)
+            throw new RuntimeException("A request must not be answered twice");
+
         long serverL = 0;
         long serverM = 0;
         if (this.serverId.isPresent()) {
@@ -110,6 +118,8 @@ public class MockRequest extends Request {
         final long customerL = cid.getLeastSignificantBits();
         final long customerM = cid.getMostSignificantBits();
         respondWithInt(this.responsePtr, integer, this.serverId.isPresent(), serverL, serverM, customerL, customerM);
+
+        this.responsePtr = 0;
     }
 
     private static native void respondWithInt(long responsePtr, int i, boolean hasServerId, long serverL, long serverM,
@@ -121,7 +131,10 @@ public class MockRequest extends Request {
     }
 
     @Override
-    public void respondWithSoldOut() {
+    public synchronized void respondWithSoldOut() {
+        if (this.responsePtr == 0)
+            throw new RuntimeException("A request must not be answered twice");
+
         final UUID sid = this.serverId.get().getUUID();
         final long serverL = sid.getLeastSignificantBits();
         final long serverM = sid.getMostSignificantBits();
@@ -129,13 +142,18 @@ public class MockRequest extends Request {
         final long customerL = cid.getLeastSignificantBits();
         final long customerM = cid.getMostSignificantBits();
         respondWithSoldOut(this.responsePtr, serverL, serverM, customerL, customerM);
+
+        this.responsePtr = 0;
     }
 
     private static native void respondWithSoldOut(long responsePtr, long serverL, long serverM, long customerL,
             long customerM);
 
     @Override
-    public void respondWithServerIds(final Iterable<ServerId> ids) {
+    public synchronized void respondWithServerIds(final Iterable<ServerId> ids) {
+        if (this.responsePtr == 0)
+            throw new RuntimeException("A request must not be answered twice");
+
         int length = 0;
         for (@SuppressWarnings("unused")
         final var id : ids) {
@@ -150,6 +168,8 @@ public class MockRequest extends Request {
             i += 2;
         }
         respondWithServerIds(this.responsePtr, sids);
+
+        this.responsePtr = 0;
     }
 
     private static native void respondWithServerIds(long responsePtr, long serverIds[]);

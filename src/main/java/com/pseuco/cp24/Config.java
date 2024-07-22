@@ -34,7 +34,7 @@ public class Config {
      * @param estimatorRoundtripTime Estimator roundtrip time in seconds.
      * @param bonus                  Flag indicating whether to use the bonus implementation.
      */
-    protected Config(final int numTickets, final int timeout, final int estimatorRoundtripTime, final boolean bonus) {
+    public Config(final int numTickets, final int timeout, final int estimatorRoundtripTime, final boolean bonus) {
         this.numTickets = numTickets;
         this.timeout = timeout;
         // We just set this to two for now.

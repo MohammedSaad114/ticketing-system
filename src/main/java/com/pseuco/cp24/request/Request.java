@@ -71,7 +71,8 @@ public abstract class Request {
     public enum Kind {
         /**
          * <p>
-         * Retrieves or sets the number of servers for on-demand scaling.
+         * Retrieves or sets the number of active (i.e., non-terminating)
+         * servers for on-demand scaling.
          * </p>
          *
          * <p>

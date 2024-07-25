@@ -1,17 +1,24 @@
+//! Testing infrastructure
+
+#![warn(missing_docs)]
+
 use eyre::{eyre, Result};
 use project_settings::ProjectSettings;
 
 mod api;
 mod project_settings;
-pub use api::{Api, ApiResponse, RequestOptions, Reservation, UserSession};
+pub use api::{Api, ApiResponse, RequestOptions, Reservation, SessionState, UserSession};
 
+/// Run configuration: Which implementation (Rust/Java) to test
 #[derive(Clone, Debug)]
 pub enum RunCfg {
+    /// Use the implementation of the `ticket-sale-rocket` crate
     RustNative,
-    // Jar path
+    /// Use the Java native interface and the given Jar path
     JavaNative(String),
 }
 
+/// Builder for [`TestCtx`]
 pub struct TestCtxBuilder {
     /// Whether to run the bonus implementation
     pub bonus: bool,
@@ -27,6 +34,7 @@ pub struct TestCtxBuilder {
     /// Whether to enable Java assertions (default: true)
     pub assertions: bool,
 
+    /// Which implementation to launch
     pub run_cfg: RunCfg,
 }
 

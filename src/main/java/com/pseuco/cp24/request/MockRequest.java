@@ -3,9 +3,14 @@ package com.pseuco.cp24.request;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+
+import com.pseuco.cp24.Config;
+import com.pseuco.cp24.rocket.Rocket;
 
 /**
  * <p>
@@ -174,64 +179,126 @@ public class MockRequest extends Request {
 
     private static native void respondWithServerIds(long responsePtr, long serverIds[]);
 
-    private static boolean checkShutdown() {
-        final var current = Thread.currentThread();
-        final var group = current.getThreadGroup();
-        final int activeCount = group.activeCount();
+}
 
-        if (activeCount <= 1)
-            return true;
+class RocketLauncher {
 
-        System.out.println(
-            "RequestHandler.shutdown() did not terminate all other threads. The following are still running:");
-        final var threads = new Thread[activeCount];
-        group.enumerate(threads);
-        for (final var thread : threads) {
-            if (thread == null || thread == current)
-                continue;
-            System.out.println("Thread: " + thread.getName());
-            System.out.println("----------- Stack Trace -----------");
-            for (final var element : thread.getStackTrace()) {
-                System.out.println(element);
+    /**
+     * Mapping from thread groups to print channels
+     */
+    private static final Map<ThreadGroup, Long> printChannels = new HashMap<>();
+    /**
+     * Whether <code>System.setOut()</code> and <code>System.setErr()</code>
+     * were called accordingly.
+     *
+     * Guarded by {@link printChannels}’ object lock
+     */
+    private static boolean setupDone = false;
+
+    private RequestHandler balancer;
+    private final ThreadGroup threadGroup;
+    private final Thread[] balancerThreads;
+
+    private RocketLauncher(final Config config, final long[] balancerContexts, long printChannel)
+            throws InterruptedException {
+        this.threadGroup = new ThreadGroup("test-" + Long.toString(printChannel, 16));
+        this.balancerThreads = new Thread[balancerContexts.length];
+        synchronized (RocketLauncher.printChannels) {
+            if (!RocketLauncher.setupDone) {
+                System.setOut(new PrintStream(new Output(false)));
+                System.setErr(new PrintStream(new Output(true)));
+                RocketLauncher.setupDone = true;
             }
-            System.out.println("-----------------------------------");
+            RocketLauncher.printChannels.put(this.threadGroup, printChannel);
         }
 
-        return false;
+        // Launch the rocket from within the test’s `ThreadGroup`
+        final var launchThread = new Thread(this.threadGroup, () -> {
+            this.balancer = Rocket.launch(config);
+        }, "launcher");
+        launchThread.start();
+        launchThread.join();
+
+        /// Create balancer threads that are part of the test’s `ThreadGroup`
+        for (int i = 0; i < balancerContexts.length; i++) {
+            final var balancerContext = balancerContexts[i];
+            final var balancerThread = new Thread(this.threadGroup, () -> {
+                balancerMain(balancerContext, this.balancer);
+            }, "balancer-" + i);
+            balancerThread.start();
+            this.balancerThreads[i] = balancerThread;
+        }
     }
 
-    private static void setupOutput() {
-        System.setOut(new PrintStream(new OutputStream() {
-            @Override
-            public void write(int b) throws IOException {
-                writeOutByte(b);
-            }
+    private class Output extends OutputStream {
+        private final boolean isError;
 
-            @Override
-            public void write(byte[] b, int off, int len) throws IOException {
-                Objects.checkFromIndexSize(off, len, b.length);
-                writeOut(b, off, len);
-            }
-        }));
-        System.setErr(new PrintStream(new OutputStream() {
-            @Override
-            public void write(int b) throws IOException {
-                writeErrByte(b);
-            }
+        Output(final boolean isError) {
+            this.isError = isError;
+        }
 
-            @Override
-            public void write(byte[] b, int off, int len) throws IOException {
-                Objects.checkFromIndexSize(off, len, b.length);
-                writeErr(b, off, len);
+        private long channel() {
+            var group = Thread.currentThread().getThreadGroup();
+            while (group != null) {
+                final var res = printChannels.get(group);
+                if (res != null)
+                    return res;
+                group = group.getParent();
             }
-        }));
+            return 0;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            printByte(channel(), this.isError, b);
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            Objects.checkFromIndexSize(off, len, b.length);
+            print(channel(), this.isError, b, off, len);
+        }
     }
 
-    private static native void writeOutByte(int b);
+    private boolean land() throws InterruptedException {
+        for (final var thread : this.balancerThreads) {
+            thread.join();
+        }
 
-    private static native void writeErrByte(int b);
+        this.balancer.shutdown();
 
-    private static native void writeOut(byte[] b, int off, int len);
+        final var current = Thread.currentThread();
+        final int activeCount = this.threadGroup.activeCount();
+        final boolean success = activeCount <= 1;
 
-    private static native void writeErr(byte[] b, int off, int len);
+        if (!success) {
+            System.out.println(
+                "RequestHandler.shutdown() did not terminate all other threads. The following are still running:");
+            final var threads = new Thread[activeCount];
+            this.threadGroup.enumerate(threads);
+            for (final var thread : threads) {
+                if (thread == null || thread == current)
+                    continue;
+                System.out.println("Thread: " + thread.getName());
+                System.out.println("----------- Stack Trace -----------");
+                for (final var element : thread.getStackTrace()) {
+                    System.out.println(element);
+                }
+                System.out.println("-----------------------------------");
+            }
+        }
+
+        synchronized (RocketLauncher.printChannels) {
+            RocketLauncher.printChannels.remove(this.threadGroup);
+        }
+
+        return success;
+    }
+
+    private static native void balancerMain(long context, RequestHandler handler);
+
+    private static native void printByte(long printChannel, boolean isError, int b);
+
+    private static native void print(long printChannel, boolean isError, byte[] b, int off, int len);
+
 }

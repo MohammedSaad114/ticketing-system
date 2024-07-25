@@ -137,7 +137,7 @@ public class Slug implements RequestHandler {
                     // Without a reservation there is nothing to abort.
                     request.respondWithError("No ticket has been reserved!");
                 } else {
-                    final var reservation = this.reservations.remove(customer);
+                    final var reservation = this.reservations.get(customer);
                     final var ticketId = request.readInt();
                     if (ticketId.isEmpty()) {
                         // The client is supposed to provide a ticket ID.
@@ -165,7 +165,7 @@ public class Slug implements RequestHandler {
                     // Without a reservation there is nothing to buy.
                     request.respondWithError("No ticket has been reserved!");
                 } else {
-                    final var reservation = this.reservations.remove(customer);
+                    final var reservation = this.reservations.get(customer);
                     final var ticketId = request.readInt();
                     if (ticketId.isEmpty()) {
                         // The client is supposed to provide a ticket ID.

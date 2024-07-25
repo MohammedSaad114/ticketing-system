@@ -15,8 +15,8 @@ pub async fn scale_to(ctx: &TestCtx, num_servers: usize) -> Result<HashSet<Uuid>
     );
     let servers = HashSet::from_iter(ctx.api.get_servers().await?.result?);
     assert_eq!(
-      servers.len(), num_servers,
-      "After scaling to {num_servers} servers, `get_servers` must return {num_servers} server ids."
-  );
+        servers.len(), num_servers,
+        "After scaling to {num_servers} servers, `get_servers` must return {num_servers} server ids."
+    );
     Ok(servers)
 }

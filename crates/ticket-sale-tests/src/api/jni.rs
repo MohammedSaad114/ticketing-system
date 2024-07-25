@@ -37,9 +37,18 @@ use super::{check_send_result, Api, RequestMsg, Response};
 
 static JVM: OnceLock<JavaVM> = OnceLock::new();
 
+type PrintSender = flume::Sender<(String, PrintKind)>;
+
+enum PrintKind {
+    Regular,
+    Error,
+    Panic,
+}
+
 #[derive(Clone)]
 struct BalancerThreadContext {
     receiver: flume::Receiver<RequestMsg>,
+    print_sender: PrintSender,
     mock_request_cls: GlobalRef,
     mock_request_init: JMethodID,
     request_handler_handle: JMethodID,
@@ -49,7 +58,7 @@ pub struct JniBalancer {
     rocket_launcher: GlobalRef,
     // In case `shutdown()` is never called, we better leak the sender, because
     // there may still be Java threads running and printing
-    print_sender: ManuallyDrop<Box<flume::Sender<(String, bool)>>>,
+    print_sender: ManuallyDrop<Box<flume::Sender<(String, PrintKind)>>>,
 }
 
 fn init_jvm(class_path: &str, enable_assertions: bool) -> JavaVM {
@@ -169,10 +178,13 @@ pub async fn start(
 
     let mock_request_cls = env.new_global_ref(mock_request_cls)?;
 
+    let (print_sender, print_receiver) = flume::unbounded();
+
     let it = (0..threads).map(|_| {
         let (sender, receiver) = flume::bounded::<RequestMsg>(65536);
         let balancer_context = Box::into_raw(Box::new(BalancerThreadContext {
             receiver,
+            print_sender: print_sender.clone(),
             mock_request_cls: mock_request_cls.clone(),
             mock_request_init,
             request_handler_handle,
@@ -184,15 +196,14 @@ pub async fn start(
     let j_balancer_contexts = env.new_long_array(threads as i32)?;
     env.set_long_array_region(&j_balancer_contexts, 0, &balancer_contexts)?;
 
-    let (print_sender, print_receiver) = flume::unbounded();
     std::thread::Builder::new()
         .name("printer".to_string())
         .spawn(move || {
-            for (msg, is_error) in print_receiver.into_iter() {
-                if is_error {
-                    eprint!("{msg}");
-                } else {
-                    print!("{msg}");
+            for (msg, kind) in print_receiver.into_iter() {
+                match kind {
+                    PrintKind::Regular => print!("{msg}"),
+                    PrintKind::Error => eprint!("{msg}"),
+                    PrintKind::Panic => panic!("{msg}"),
                 }
             }
         })
@@ -358,6 +369,7 @@ unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_balancerMa
     // this method once per `context` value.
     let BalancerThreadContext {
         receiver,
+        print_sender,
         mock_request_cls,
         mock_request_init,
         request_handler_handle,
@@ -383,7 +395,7 @@ unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_balancerMa
         // long serverM
         // int payload
         // SAFETY: the JMethodID is valid and the argument / return types match
-        let rq_obj = unsafe {
+        let result = unsafe {
             env.new_object_unchecked(
                 &mock_request_cls,
                 mock_request_init,
@@ -398,19 +410,28 @@ unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_balancerMa
                     JValue::Int(payload).as_jni(),
                 ],
             )
-        }
-        .unwrap();
+        };
+        let rq_obj = match result {
+            Ok(obj) => obj,
+            Err(err) => {
+                print_sender.send((err.to_string(), PrintKind::Panic)).ok();
+                return;
+            }
+        };
 
         // SAFETY: the JMethodID is valid and the argument / return types match
-        unsafe {
+        let result = unsafe {
             env.call_method_unchecked(
                 &request_handler,
                 request_handler_handle,
                 ReturnType::Primitive(Primitive::Void),
                 &[JValue::Object(&rq_obj).as_jni()],
             )
+        };
+        if let Err(err) = result {
+            print_sender.send((err.to_string(), PrintKind::Panic)).ok();
+            return;
         }
-        .unwrap();
     }
 }
 
@@ -434,9 +455,13 @@ unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_printByte<
         // SAFETY: The Java side guarantees `stream` to be a valid pointer. (We
         // don’t drop the channel until the shutdown has completed and the
         // address is removed from the `printChannels` map there.)
-        let stream: &flume::Sender<(String, bool)> =
-            unsafe { &*sptr::from_exposed_addr(stream as u64 as usize) };
-        stream.send((msg.into_owned(), is_error != 0)).ok();
+        let stream: &PrintSender = unsafe { &*sptr::from_exposed_addr(stream as u64 as usize) };
+        let kind = if is_error != 0 {
+            PrintKind::Error
+        } else {
+            PrintKind::Regular
+        };
+        stream.send((msg.into_owned(), kind)).ok();
     }
 }
 
@@ -468,9 +493,14 @@ unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_print<'loc
                 // SAFETY: The Java side guarantees `stream` to be a valid pointer. (We
                 // don’t drop the channel until the shutdown has completed and the
                 // address is removed from the `printChannels` map there.)
-                let stream: &flume::Sender<(String, bool)> =
+                let stream: &PrintSender =
                     unsafe { &*sptr::from_exposed_addr(stream as u64 as usize) };
-                stream.send((msg.into_owned(), is_error != 0)).ok();
+                let kind = if is_error != 0 {
+                    PrintKind::Error
+                } else {
+                    PrintKind::Regular
+                };
+                stream.send((msg.into_owned(), kind)).ok();
             }
         }
     }

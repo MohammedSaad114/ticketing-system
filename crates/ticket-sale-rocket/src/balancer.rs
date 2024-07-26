@@ -62,7 +62,7 @@ impl Balancer {
     }
 
     fn set_num_servers(&self, num_servers: u32) {
-        let mut servers = self.servers.lock().unwrap();
+        let servers = self.servers.lock().unwrap();
         let current_num_servers = servers.len() as u32;
 
         if num_servers > current_num_servers {
@@ -83,7 +83,7 @@ impl Balancer {
     fn get_servers(&self) -> Vec<Uuid> {
         self.servers.lock().unwrap().keys().cloned().collect()
     }
-
+    /*
     fn get_another_server_id(&self, excluding_id: Uuid) -> Option<Uuid> {
         self.servers
             .lock()
@@ -92,7 +92,7 @@ impl Balancer {
             .filter(|(&id, server)| id != excluding_id && !server.is_terminating())
             .map(|(&id, _)| id)
             .next()
-    }
+    }*/
 }
 
 impl RequestHandler for Balancer {
@@ -124,7 +124,7 @@ impl RequestHandler for Balancer {
                 let customer_id = rq.customer_id();
                 let server_id = {
                     let server_id_opt = {
-                        let mut customer_to_server = self.customer_to_server.lock().unwrap(); // highlight
+                        let customer_to_server = self.customer_to_server.lock().unwrap(); // highlight
                         customer_to_server.get(&customer_id).cloned() // highlight
                     }; // highlight
 

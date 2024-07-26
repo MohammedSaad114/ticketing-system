@@ -116,7 +116,7 @@ impl Server {
         }
     }
 
-    fn handle_reservation_request(&mut self, mut rq: Request) {
+    fn handle_reservation_request(&mut self, rq: Request) {
         if let Some(reservation_time) = self.reservations.remove(&rq.customer_id()) {
             if rq.kind() == &RequestKind::BuyTicket {
                 if reservation_time.elapsed().unwrap_or_default().as_secs()

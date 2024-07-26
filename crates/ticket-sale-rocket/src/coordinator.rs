@@ -24,6 +24,7 @@ pub struct Coordinator {
 }
 
 impl Coordinator {
+    /// Create the [`Coordinator`]
     pub fn new(reservation_timeout: u32, database: Arc<Mutex<Database>>) -> Self {
         Self {
             reservation_timeout,
@@ -32,6 +33,7 @@ impl Coordinator {
         }
     }
 
+    /// Add a new server to the coordinator
     pub fn add_server(&self, initial_allocation: u32) -> Uuid {
         let server = Arc::new(Mutex::new(Server::new(
             self.database.clone(),
@@ -43,6 +45,7 @@ impl Coordinator {
         id
     }
 
+    /// Remove a server from the coordinator
     pub fn remove_server(&self, id: Uuid) {
         let mut servers = self.servers.lock().unwrap();
         if let Some(server) = servers.remove(&id) {

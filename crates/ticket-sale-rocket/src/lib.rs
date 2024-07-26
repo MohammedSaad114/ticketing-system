@@ -45,13 +45,13 @@ pub fn launch(config: &Config) -> Balancer {
         config.estimator_roundtrip_time,
     );
 
-    // Initialize the initial servers
+    // Launch estimator
+    estimator.start();
+
+    // Add initial servers
     for _ in 0..config.initial_servers {
         coordinator.add_server(10);
     }
-
-    // Start the estimator
-    estimator.start();
 
     balancer
 }

@@ -14,6 +14,11 @@ pub struct Estimator {
 }
 
 impl Estimator {
+    /// The estimator's main routine.
+    ///
+    /// `roundtrip_secs` is the time in seconds the estimator needs to contact all
+    /// servers. If there are `N` servers, then the estimator should wait
+    /// `roundtrip_secs / N` between each server when collecting statistics.
     pub fn new(
         coordinator: Arc<Coordinator>,
         database: Arc<Mutex<Database>>,
@@ -26,6 +31,7 @@ impl Estimator {
         }
     }
 
+    /// Start the estimator
     pub fn start(&self) {
         let coordinator = self.coordinator.clone();
         let database = self.database.clone();
@@ -36,14 +42,16 @@ impl Estimator {
                 let servers = coordinator.get_servers();
                 let num_servers = servers.len() as u32;
 
-                for server_id in servers {
+                let db_available = {
                     let db = database.lock().unwrap();
-                    let num_available = db.get_num_available();
+                    db.get_num_available()
+                };
 
-                    println!(
-                        "Estimating: Server ID: {}, Available Tickets: {}",
-                        server_id, num_available
-                    );
+                for server_id in servers {
+                    // Send the estimated number of tickets to the server
+                    if let Some(server) = coordinator.get_server(server_id) {
+                        server.lock().unwrap().update_estimate(db_available);
+                    }
 
                     thread::sleep(std::time::Duration::from_secs(
                         (roundtrip_secs / num_servers) as u64,

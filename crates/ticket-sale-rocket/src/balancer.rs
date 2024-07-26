@@ -35,22 +35,30 @@ impl Balancer {
             .cloned()
     }
 
-    fn assign_server_to_customer(&self, customer: Uuid) -> Option<Uuid> {
-        let servers = self.coordinator.get_servers();
-        if servers.is_empty() {
-            return None;
-        }
-        let index = rand::random::<usize>() % servers.len();
-        let server_id = servers[index];
+    fn assign_server_to_customer(&self, customer: Uuid) -> Uuid {
+        let server_id = {
+            let servers = self.coordinator.get_servers();
+            if !servers.is_empty() {
+                let index = rand::random::<usize>() % servers.len();
+                servers[index]
+            } else {
+                // Handle the case when servers is empty
+                eprintln!("Error: No servers available.");
+                return Default::default(); // or handle the error condition appropriately
+            }
+        };
         self.customer_to_server
             .lock()
             .unwrap()
             .insert(customer, server_id);
-        Some(server_id)
+        server_id
     }
 }
 
 impl RequestHandler for Balancer {
+    // 📌 Hint: Look into the `RequestHandler` trait definition for specification
+    // docstrings of `handle()` and `shutdown()`.
+
     fn handle(&self, mut rq: Request) {
         match rq.kind() {
             RequestKind::GetNumServers => {
@@ -83,7 +91,7 @@ impl RequestHandler for Balancer {
                 let customer_id = rq.customer_id();
                 let server_id = self
                     .get_server_for_customer(customer_id)
-                    .unwrap_or_else(|| self.assign_server_to_customer(customer_id).unwrap());
+                    .unwrap_or_else(|| self.assign_server_to_customer(customer_id));
                 rq.set_server_id(server_id);
                 self.coordinator.handle_request(rq);
             }

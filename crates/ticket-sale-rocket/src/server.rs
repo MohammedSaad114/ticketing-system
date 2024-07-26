@@ -11,15 +11,21 @@ use super::database::Database;
 
 /// A server in the ticket sales system
 pub struct Server {
+    /// The server's ID
     id: Uuid,
+
+    /// The database
     database: Arc<Mutex<Database>>,
+
     allocated_tickets: Vec<u32>,
     reservations: HashMap<Uuid, (u32, SystemTime)>,
     reservation_timeout: u32,
     terminating: bool,
+    estimated_tickets: u32,
 }
 
 impl Server {
+    /// Create a new [`Server`]
     pub fn new(
         database: Arc<Mutex<Database>>,
         initial_allocation: u32,
@@ -34,6 +40,7 @@ impl Server {
             reservations: HashMap::new(),
             reservation_timeout,
             terminating: false,
+            estimated_tickets: 0,
         }
     }
 
@@ -62,6 +69,12 @@ impl Server {
         self.handle_request(rq);
     }
 
+    /// Update the estimate of available tickets from the estimator
+    pub fn update_estimate(&mut self, db_available: u32) {
+        self.estimated_tickets = db_available + self.allocated_tickets.len() as u32;
+    }
+
+    /// Handle a [`Request`]
     fn handle_request(&mut self, rq: Request) {
         self.clean_expired_reservations();
 
@@ -78,20 +91,22 @@ impl Server {
             match rq.kind() {
                 RequestKind::NumAvailableTickets => {
                     let available_tickets = self.allocated_tickets.len() as u32;
-                    rq.respond_with_int(available_tickets);
+                    rq.respond_with_int(available_tickets + self.estimated_tickets);
                 }
                 RequestKind::ReserveTicket => {
                     if !self.allocated_tickets.is_empty() {
                         let ticket = self.allocated_tickets.pop().unwrap();
                         let now = SystemTime::now();
                         self.reservations.insert(rq.customer_id(), (ticket, now));
-                        rq.respond_with_int(ticket);
+                        rq.respond_with_int(ticket); // Ensure response is an integer
                     } else {
                         let mut allocated_tickets = {
                             let mut db = self.database.lock().unwrap();
                             db.allocate(10)
                         };
                         self.allocated_tickets.append(&mut allocated_tickets);
+
+                        // Now we can handle the request again after allocating tickets
                         self.handle_request(rq);
                     }
                 }
@@ -115,13 +130,13 @@ impl Server {
                     > self.reservation_timeout as u64
                 {
                     rq.respond_with_err("Reservation expired");
-                    self.allocated_tickets.push(ticket);
+                    self.allocated_tickets.push(ticket); // Return ticket to available
                 } else {
-                    rq.respond_with_int(ticket);
+                    rq.respond_with_int(ticket); // Respond with the ticket number
                 }
             } else if rq.kind() == &RequestKind::AbortPurchase {
                 self.database.lock().unwrap().deallocate(&[ticket]);
-                rq.respond_with_int(ticket);
+                rq.respond_with_int(ticket); // Ensure response is an integer
             }
         } else {
             rq.respond_with_err("No reservation found");
@@ -142,7 +157,7 @@ impl Server {
 
         for id in expired {
             if let Some((ticket, _)) = self.reservations.remove(&id) {
-                self.allocated_tickets.push(ticket);
+                self.allocated_tickets.push(ticket); // return ticket to allocated tickets
             }
         }
     }

@@ -1,6 +1,10 @@
 //! Implementation of the server
 
-use ticket_sale_core::Request;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
+
+use ticket_sale_core::{Request, RequestKind};
 use uuid::Uuid;
 
 use super::database::Database;
@@ -11,18 +15,141 @@ pub struct Server {
     id: Uuid,
 
     /// The database
-    database: Database,
+    database: Arc<Mutex<Database>>,
+
+    allocated_tickets: Vec<u32>,
+    reservations: HashMap<Uuid, SystemTime>,
+    reservation_timeout: u32,
+    terminating: bool,
 }
 
 impl Server {
     /// Create a new [`Server`]
-    pub fn new(database: Database) -> Server {
+    pub fn new(
+        database: Arc<Mutex<Database>>,
+        initial_allocation: u32,
+        reservation_timeout: u32,
+    ) -> Server {
         let id = Uuid::new_v4();
-        Self { id, database }
+        let allocated_tickets = database.lock().unwrap().allocate(initial_allocation);
+        Self {
+            id,
+            database,
+            allocated_tickets,
+            reservations: HashMap::new(),
+            reservation_timeout,
+            terminating: false,
+        }
+    }
+
+    pub fn get_id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn is_terminating(&self) -> bool {
+        self.terminating
+    }
+
+    pub fn terminate(&mut self) {
+        self.terminating = true;
+        self.database
+            .lock()
+            .unwrap()
+            .deallocate(&self.allocated_tickets);
+        self.allocated_tickets.clear();
+    }
+
+    pub fn can_shutdown(&self) -> bool {
+        self.reservations.is_empty()
+    }
+
+    pub fn process_request(&mut self, rq: Request) {
+        self.handle_request(rq);
     }
 
     /// Handle a [`Request`]
     fn handle_request(&mut self, rq: Request) {
-        todo!()
+        self.clean_expired_reservations();
+
+        if self.terminating {
+            match rq.kind() {
+                RequestKind::BuyTicket | RequestKind::AbortPurchase => {
+                    self.handle_reservation_request(rq);
+                }
+                _ => {
+                    rq.respond_with_err("Server is terminating");
+                }
+            }
+        } else {
+            match rq.kind() {
+                RequestKind::NumAvailableTickets => {
+                    let available_tickets = self.allocated_tickets.len() as u32;
+                    rq.respond_with_int(available_tickets);
+                }
+                RequestKind::ReserveTicket => {
+                    if !self.allocated_tickets.is_empty() {
+                        let ticket = self.allocated_tickets.pop().unwrap();
+                        let now = SystemTime::now();
+                        self.reservations.insert(rq.customer_id(), now);
+                        rq.respond_with_string(format!("Ticket {} reserved successfully", ticket));
+                    } else {
+                        let mut allocated_tickets = {
+                            let mut db = self.database.lock().unwrap();
+                            db.allocate(10)
+                        };
+                        self.allocated_tickets.append(&mut allocated_tickets);
+
+                        // Now we can handle the request again after allocating tickets
+                        self.handle_request(rq);
+                    }
+                }
+                RequestKind::BuyTicket | RequestKind::AbortPurchase => {
+                    self.handle_reservation_request(rq);
+                }
+                RequestKind::Debug => {
+                    rq.respond_with_string("Debugging request handled");
+                }
+                _ => {
+                    rq.respond_with_err("Invalid request for server");
+                }
+            }
+        }
+    }
+
+    fn handle_reservation_request(&mut self, mut rq: Request) {
+        if let Some(reservation_time) = self.reservations.remove(&rq.customer_id()) {
+            if rq.kind() == &RequestKind::BuyTicket {
+                if reservation_time.elapsed().unwrap_or_default().as_secs()
+                    > self.reservation_timeout as u64
+                {
+                    rq.respond_with_err("Reservation expired");
+                } else {
+                    rq.respond_with_string("Ticket purchased successfully");
+                }
+            } else if rq.kind() == &RequestKind::AbortPurchase {
+                self.database.lock().unwrap().deallocate(&[1]);
+                rq.respond_with_string("Purchase aborted successfully");
+            }
+        } else {
+            rq.respond_with_err("No reservation found");
+        }
+    }
+
+    fn clean_expired_reservations(&mut self) {
+        let now = SystemTime::now();
+        let expired: Vec<Uuid> = self
+            .reservations
+            .iter()
+            .filter(|(_, &time)| {
+                now.duration_since(time).unwrap_or_default().as_secs()
+                    > self.reservation_timeout as u64
+            })
+            .map(|(&id, _)| id)
+            .collect();
+
+        for id in expired {
+            self.reservations.remove(&id);
+            self.allocated_tickets.push(1); // return ticket to allocated tickets
+        }
     }
 }

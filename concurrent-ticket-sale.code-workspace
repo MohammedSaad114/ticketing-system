@@ -33,7 +33,8 @@
           "args": [
             "build",
             "--bin=ticket-sale-server",
-            "--package=ticket-sale-server"
+            "--package=ticket-sale-server",
+            "--manifest-path=${workspaceFolder}/Cargo.toml",
           ],
           "filter": {
             "name": "ticket-sale-server",

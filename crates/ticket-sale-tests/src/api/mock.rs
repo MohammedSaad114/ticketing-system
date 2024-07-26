@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 use tokio::task::{self, JoinHandle};
 use uuid::Uuid;
 
-use super::{Api, RequestMsg, Response};
+use super::{check_send_result, Api, RequestMsg, Response};
 
 pub struct MockBalancer {
     balancer: Arc<ticket_sale_rocket::Balancer>,
@@ -114,7 +114,7 @@ impl RawRequest for MockRawRequest {
             server_id,
             customer_id,
         };
-        self.response_channel.send(response).unwrap()
+        check_send_result(self.response_channel.send(response))
     }
 
     fn respond_with_int(self: Box<Self>, i: u32, customer_id: Uuid, server_id: Option<Uuid>) {
@@ -123,7 +123,7 @@ impl RawRequest for MockRawRequest {
             server_id,
             customer_id,
         };
-        self.response_channel.send(response).unwrap()
+        check_send_result(self.response_channel.send(response))
     }
 
     fn respond_with_string(self: Box<Self>, s: String, customer_id: Uuid, server_id: Option<Uuid>) {
@@ -138,11 +138,11 @@ impl RawRequest for MockRawRequest {
             server_id,
             customer_id,
         };
-        self.response_channel.send(response).unwrap()
+        check_send_result(self.response_channel.send(response))
     }
 
     fn respond_with_server_list(self: Box<Self>, servers: &[Uuid]) {
         let response = Response::ServerList(servers.to_vec());
-        self.response_channel.send(response).unwrap()
+        check_send_result(self.response_channel.send(response))
     }
 }

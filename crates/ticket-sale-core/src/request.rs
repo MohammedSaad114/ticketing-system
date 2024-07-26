@@ -6,7 +6,8 @@ use uuid::Uuid;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 #[repr(u8)]
 pub enum RequestKind {
-    /// Retrieve the number of servers for on-demand scaling
+    /// Retrieve the number of active (i.e., non-terminating) servers for
+    /// on-demand scaling
     ///
     /// 📌 Hint: Should be processed by the load balancer.
     GetNumServers,

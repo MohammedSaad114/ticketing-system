@@ -1,39 +1,64 @@
 //! Mock API implementation directly using the Java Native Interface
 
 use std::ffi::c_void;
+use std::mem::ManuallyDrop;
 use std::sync::OnceLock;
 
 use eyre::Result;
+use jni::objects::JObject;
 use jni::{
     objects::{GlobalRef, JClass, JMethodID, JPrimitiveArray, JString, JValue, ReleaseMode},
     signature::{Primitive, ReturnType},
     sys::{jboolean, jbyte, jint, jlong},
     InitArgsBuilder, JNIEnv, JavaVM, NativeMethod,
 };
-use parking_lot::Mutex;
-use ticket_sale_core::RequestKind;
 use tokio::sync::oneshot;
-use tokio::task::{self, JoinHandle};
+use tokio::task;
 use uuid::Uuid;
 
-use super::{Api, RequestMsg, Response};
+use super::{check_send_result, Api, RequestMsg, Response};
 
-// spell-checker:ignore jboolean,jbyte,jint,jlong,jstring
+// spell-checker:ignore jboolean,jbyte,jint,jlong,jstring,libtest
+
+// Printing in tests is … complicated. Test cases may be run concurrently, so we
+// we want printing output to be associated with the respective test case.
+// `libtest` handles this by setting an internal flag which makes the print
+// macros capture the output in a thread-local buffer. However, only threads
+// spawned from Rust are associated with the respective test case and capture
+// printing output accordingly. The solution we use here is as follows: We have
+// a Rust thread per `JniBalancer` which reads from a printing stream and
+// invokes `print!` or `eprint!`, respectively, for every incoming message. We
+// spawn all Java threads (concretely, the one launching the `Rocket` and the
+// balancer threads) in a separate `ThreadGroup` per test. When these threads
+// spawn new threads, they will be in the same thread group by default. On the
+// Java side, we use `System.setOut()` and `System.setErr()` to set the print
+// handlers, and they use a `static` `HashMap` to map the current threads’ group
+// to the respective print channel print channel.
 
 static JVM: OnceLock<JavaVM> = OnceLock::new();
-static JVM_RC: Mutex<u32> = Mutex::new(0);
+
+type PrintSender = flume::Sender<(String, PrintKind)>;
+
+enum PrintKind {
+    Regular,
+    Error,
+    Panic,
+}
 
 #[derive(Clone)]
-struct JniContext {
+struct BalancerThreadContext {
+    receiver: flume::Receiver<RequestMsg>,
+    print_sender: PrintSender,
     mock_request_cls: GlobalRef,
     mock_request_init: JMethodID,
-    request_handler: GlobalRef,
     request_handler_handle: JMethodID,
 }
 
 pub struct JniBalancer {
-    context: JniContext,
-    join_handles: Vec<JoinHandle<()>>,
+    rocket_launcher: GlobalRef,
+    // In case `shutdown()` is never called, we better leak the sender, because
+    // there may still be Java threads running and printing
+    print_sender: ManuallyDrop<Box<flume::Sender<(String, PrintKind)>>>,
 }
 
 fn init_jvm(class_path: &str, enable_assertions: bool) -> JavaVM {
@@ -63,64 +88,69 @@ pub async fn start(
     class_path: &str,
     enable_assertions: bool,
 ) -> Result<(JniBalancer, Api)> {
-    let jvm = JVM.get_or_init(|| init_jvm(class_path, enable_assertions));
-    *JVM_RC.lock() += 1;
+    let mut jvm_init = false;
+    let jvm = JVM.get_or_init(|| {
+        jvm_init = true;
+        init_jvm(class_path, enable_assertions)
+    });
 
     let mut env = jvm.attach_current_thread()?;
 
     let mock_request_cls = env.find_class("com/pseuco/cp24/request/MockRequest")?;
+    let rocket_launcher_cls = env.find_class("com/pseuco/cp24/request/RocketLauncher")?;
 
-    env.register_native_methods(
-        &mock_request_cls,
-        &[
-            NativeMethod {
-                name: "respondWithError".into(),
-                sig: "(JLjava/lang/String;ZJJJJ)V".into(), // spell-checker:disable-line
-                fn_ptr: Java_com_pseuco_cp24_request_MockRequest_respondWithError as *mut c_void,
-            },
-            NativeMethod {
-                name: "respondWithInt".into(),
-                sig: "(JIZJJJJ)V".into(), // spell-checker:disable-line
-                fn_ptr: Java_com_pseuco_cp24_request_MockRequest_respondWithInt as *mut c_void,
-            },
-            NativeMethod {
-                name: "respondWithSoldOut".into(),
-                sig: "(JJJJJ)V".into(), // spell-checker:disable-line
-                fn_ptr: Java_com_pseuco_cp24_request_MockRequest_respondWithSoldOut as *mut c_void,
-            },
-            NativeMethod {
-                name: "respondWithServerIds".into(),
-                sig: "(J[J)V".into(), // spell-checker:disable-line
-                fn_ptr: Java_com_pseuco_cp24_request_MockRequest_respondWithServerIds
-                    as *mut c_void,
-            },
-            NativeMethod {
-                name: "writeOutByte".into(),
-                sig: "(I)V".into(),
-                fn_ptr: Java_com_pseuco_cp24_request_MockRequest_writeOutByte as *mut c_void,
-            },
-            NativeMethod {
-                name: "writeErrByte".into(),
-                sig: "(I)V".into(),
-                fn_ptr: Java_com_pseuco_cp24_request_MockRequest_writeErrByte as *mut c_void,
-            },
-            NativeMethod {
-                name: "writeOut".into(),
-                sig: "([BII)V".into(),
-                fn_ptr: Java_com_pseuco_cp24_request_MockRequest_writeOut as *mut c_void,
-            },
-            NativeMethod {
-                name: "writeErr".into(),
-                sig: "([BII)V".into(),
-                fn_ptr: Java_com_pseuco_cp24_request_MockRequest_writeErr as *mut c_void,
-            },
-        ],
-    )?;
-    env.call_static_method(&mock_request_cls, "setupOutput", "()V", &[])
-        .unwrap();
+    if jvm_init {
+        env.register_native_methods(
+            &mock_request_cls,
+            &[
+                NativeMethod {
+                    name: "respondWithError".into(),
+                    sig: "(JLjava/lang/String;ZJJJJ)V".into(), // spell-checker:disable-line
+                    fn_ptr: Java_com_pseuco_cp24_request_MockRequest_respondWithError
+                        as *mut c_void,
+                },
+                NativeMethod {
+                    name: "respondWithInt".into(),
+                    sig: "(JIZJJJJ)V".into(), // spell-checker:disable-line
+                    fn_ptr: Java_com_pseuco_cp24_request_MockRequest_respondWithInt as *mut c_void,
+                },
+                NativeMethod {
+                    name: "respondWithSoldOut".into(),
+                    sig: "(JJJJJ)V".into(), // spell-checker:disable-line
+                    fn_ptr: Java_com_pseuco_cp24_request_MockRequest_respondWithSoldOut
+                        as *mut c_void,
+                },
+                NativeMethod {
+                    name: "respondWithServerIds".into(),
+                    sig: "(J[J)V".into(), // spell-checker:disable-line
+                    fn_ptr: Java_com_pseuco_cp24_request_MockRequest_respondWithServerIds
+                        as *mut c_void,
+                },
+            ],
+        )?;
 
-    // spell-checker:disable-next-line
-    let mock_request_init = env.get_method_id(&mock_request_cls, "<init>", "(JIJJZJJI)V")?;
+        env.register_native_methods(
+            &rocket_launcher_cls,
+            &[
+                NativeMethod {
+                    name: "balancerMain".into(),
+                    // spell-checker:disable-next-line
+                    sig: "(JLcom/pseuco/cp24/request/RequestHandler;)V".into(),
+                    fn_ptr: Java_com_pseuco_cp24_request_RocketLauncher_balancerMain as *mut c_void,
+                },
+                NativeMethod {
+                    name: "printByte".into(),
+                    sig: "(JZI)V".into(),
+                    fn_ptr: Java_com_pseuco_cp24_request_RocketLauncher_printByte as *mut c_void,
+                },
+                NativeMethod {
+                    name: "print".into(),
+                    sig: "(JZ[BII)V".into(),
+                    fn_ptr: Java_com_pseuco_cp24_request_RocketLauncher_print as *mut c_void,
+                },
+            ],
+        )?;
+    }
 
     assert!(config.tickets <= i32::MAX as u32);
     assert!(config.timeout <= i32::MAX as u32);
@@ -136,14 +166,8 @@ pub async fn start(
         ],
     )?;
 
-    let request_handler = env.call_static_method(
-        "com/pseuco/cp24/rocket/Rocket",
-        "launch",
-        // spell-checker:disable-next-line
-        "(Lcom/pseuco/cp24/Config;)Lcom/pseuco/cp24/request/RequestHandler;",
-        &[JValue::Object(&j_config)],
-    )?;
-    let request_handler = env.new_global_ref(request_handler.l()?)?;
+    // spell-checker:disable-next-line
+    let mock_request_init = env.get_method_id(&mock_request_cls, "<init>", "(JIJJZJJI)V")?;
 
     let request_handler_handle = env.get_method_id(
         "com/pseuco/cp24/request/RequestHandler",
@@ -153,136 +177,78 @@ pub async fn start(
     )?;
 
     let mock_request_cls = env.new_global_ref(mock_request_cls)?;
-    let context = JniContext {
-        mock_request_cls,
-        mock_request_init,
-        request_handler,
-        request_handler_handle,
-    };
 
-    let join_handles = (0..threads).map(|_| {
+    let (print_sender, print_receiver) = flume::unbounded();
+
+    let it = (0..threads).map(|_| {
         let (sender, receiver) = flume::bounded::<RequestMsg>(65536);
-        let receiver: flume::Receiver<RequestMsg> = receiver.clone();
-        let context = context.clone();
-        let handle = task::spawn_blocking(move || {
-            let mut env = JVM.get().unwrap().attach_current_thread().unwrap();
-            for msg in receiver.into_iter() {
-                context
-                    .make_request(
-                        &mut env,
-                        msg.kind,
-                        msg.payload,
-                        msg.customer_id,
-                        msg.server_id,
-                        msg.response_channel,
-                    )
-                    .unwrap();
-            }
-        });
-        (sender, handle)
+        let balancer_context = Box::into_raw(Box::new(BalancerThreadContext {
+            receiver,
+            print_sender: print_sender.clone(),
+            mock_request_cls: mock_request_cls.clone(),
+            mock_request_init,
+            request_handler_handle,
+        }));
+        let addr = sptr::Strict::expose_addr(balancer_context) as u64 as jlong;
+        (sender, addr)
     });
-    let (senders, join_handles) = join_handles.unzip();
+    let (senders, balancer_contexts): (Vec<_>, Vec<_>) = it.unzip();
+    let j_balancer_contexts = env.new_long_array(threads as i32)?;
+    env.set_long_array_region(&j_balancer_contexts, 0, &balancer_contexts)?;
+
+    std::thread::Builder::new()
+        .name("printer".to_string())
+        .spawn(move || {
+            for (msg, kind) in print_receiver.into_iter() {
+                match kind {
+                    PrintKind::Regular => print!("{msg}"),
+                    PrintKind::Error => eprint!("{msg}"),
+                    PrintKind::Panic => panic!("{msg}"),
+                }
+            }
+        })
+        .unwrap();
+    let print_sender = ManuallyDrop::new(Box::new(print_sender));
+    let sender_ptr = &**print_sender as *const flume::Sender<_>;
+
+    let launcher = env.new_object(
+        &rocket_launcher_cls,
+        "(Lcom/pseuco/cp24/Config;[JJ)V", // spell-checker:disable-line
+        &[
+            JValue::Object(&j_config),
+            JValue::Object(&j_balancer_contexts),
+            JValue::Long(sptr::Strict::expose_addr(sender_ptr) as u64 as _),
+        ],
+    )?;
 
     let balancer = JniBalancer {
-        context,
-        join_handles,
+        print_sender,
+        rocket_launcher: env.new_global_ref(launcher)?,
     };
 
     Ok((balancer, Api::new(senders)))
 }
 
-impl JniContext {
-    fn make_request(
-        &self,
-        env: &mut JNIEnv,
-        kind: RequestKind,
-        payload: Option<u32>,
-        customer_id: Uuid,
-        server_id: Option<Uuid>,
-        response_channel: oneshot::Sender<Response>,
-    ) -> Result<()> {
-        let (cid_m, cid_l) = customer_id.as_u64_pair();
-        let (sid_m, sid_l) = server_id.unwrap_or_default().as_u64_pair();
-        let payload = match payload {
-            Some(i) => {
-                debug_assert!(i <= i32::MAX as u32);
-                i as i32
-            }
-            None => -1,
-        };
-
-        // long responsePtr
-        // int kind
-        // long customerL
-        // long customerM
-        // boolean hasServerId
-        // long serverL
-        // long serverM
-        // int payload
-        // SAFETY: the JMethodID is valid and the argument / return types match
-        let rq_obj = unsafe {
-            env.new_object_unchecked(
-                &self.mock_request_cls,
-                self.mock_request_init,
-                &[
-                    JValue::Long(channel_to_jni(response_channel)).as_jni(),
-                    JValue::Int(kind as jint).as_jni(),
-                    JValue::Long(cid_m as jlong).as_jni(),
-                    JValue::Long(cid_l as jlong).as_jni(),
-                    JValue::Bool(server_id.is_some() as jboolean).as_jni(),
-                    JValue::Long(sid_l as jlong).as_jni(),
-                    JValue::Long(sid_m as jlong).as_jni(),
-                    JValue::Int(payload).as_jni(),
-                ],
-            )
-        }?;
-
-        // SAFETY: the JMethodID is valid and the argument / return types match
-        unsafe {
-            env.call_method_unchecked(
-                &self.request_handler,
-                self.request_handler_handle,
-                ReturnType::Primitive(Primitive::Void),
-                &[JValue::Object(&rq_obj).as_jni()],
-            )
-        }?;
-
-        Ok(())
-    }
-}
-
 impl JniBalancer {
     pub async fn shutdown(self) {
-        for handle in self.join_handles {
-            handle.await.unwrap();
-        }
-
-        let context = self.context;
+        let launcher = self.rocket_launcher;
         let handle = task::spawn_blocking(move || {
             let jvm = JVM.get().unwrap();
             let mut env = jvm.attach_current_thread().unwrap();
-            env.call_method(&context.request_handler, "shutdown", "()V", &[])
-                .unwrap();
-
-            let mut lock = JVM_RC.lock();
-            *lock -= 1;
-            if *lock != 0 {
-                return;
-            }
-
-            let res =
-                env.call_static_method(&context.mock_request_cls, "checkShutdown", "()Z", &[]);
+            let res = env.call_method(&launcher, "land", "()Z", &[]).unwrap();
             assert!(
-                res.unwrap().z().unwrap(),
+                res.z().unwrap(),
                 "RequestHandler.shutdown() must wait until all other threads have terminated"
             );
         });
         handle.await.unwrap();
+
+        drop(ManuallyDrop::into_inner(self.print_sender));
     }
 }
 
 #[no_mangle]
-extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithError<'local>(
+unsafe extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithError<'local>(
     env: JNIEnv<'local>,
     _class: JClass<'local>,
     response_ptr: jlong,
@@ -311,11 +277,11 @@ extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithError<'lo
         server_id,
         customer_id,
     };
-    response_channel.send(response).unwrap();
+    check_send_result(response_channel.send(response));
 }
 
 #[no_mangle]
-extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithInt<'local>(
+unsafe extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithInt<'local>(
     _env: JNIEnv<'local>,
     _class: JClass<'local>,
     response_ptr: jlong,
@@ -340,11 +306,11 @@ extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithInt<'loca
         server_id,
         customer_id,
     };
-    response_channel.send(response).unwrap();
+    check_send_result(response_channel.send(response));
 }
 
 #[no_mangle]
-extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithSoldOut<'local>(
+unsafe extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithSoldOut<'local>(
     _env: JNIEnv<'local>,
     _class: JClass<'local>,
     response_ptr: jlong,
@@ -361,11 +327,11 @@ extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithSoldOut<'
         server_id: Some(server_id),
         customer_id,
     };
-    response_channel.send(response).unwrap();
+    check_send_result(response_channel.send(response));
 }
 
 #[no_mangle]
-extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithServerIds<'local>(
+unsafe extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithServerIds<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     response_ptr: jlong,
@@ -389,51 +355,122 @@ extern "system" fn Java_com_pseuco_cp24_request_MockRequest_respondWithServerIds
         }
     }
 
-    response_channel.send(Response::ServerList(ids)).unwrap();
+    check_send_result(response_channel.send(Response::ServerList(ids)));
 }
 
 #[no_mangle]
-extern "system" fn Java_com_pseuco_cp24_request_MockRequest_writeOutByte<'local>(
-    _env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    byte: jint,
-) {
-    print!("{}", byte as u32 as u8 as char);
-}
-
-#[no_mangle]
-extern "system" fn Java_com_pseuco_cp24_request_MockRequest_writeErrByte<'local>(
-    _env: JNIEnv<'local>,
-    _class: JClass<'local>,
-    byte: jint,
-) {
-    eprint!("{}", byte as u32 as u8 as char);
-}
-
-#[no_mangle]
-extern "system" fn Java_com_pseuco_cp24_request_MockRequest_writeOut<'local>(
+unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_balancerMain<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
-    bytes: JPrimitiveArray<'local, jbyte>,
-    offset: jint,
-    len: jint,
+    context: jlong,
+    request_handler: JObject<'local>,
 ) {
-    let offset = offset as usize;
-    let len = len as usize;
+    // SAFETY: The `Box` was created in `start()`, and the Java side only calls
+    // this method once per `context` value.
+    let BalancerThreadContext {
+        receiver,
+        print_sender,
+        mock_request_cls,
+        mock_request_init,
+        request_handler_handle,
+    } = *unsafe { Box::from_raw(sptr::from_exposed_addr_mut(context as u64 as usize)) };
 
-    if let Ok(bytes) = unsafe { env.get_array_elements_critical(&bytes, ReleaseMode::NoCopyBack) } {
-        if let Some(sub) = bytes.get(offset..offset + len) {
-            // SAFETY: `i8` and `u8` have the same data layout
-            let sub = unsafe { &*(sub as *const [i8] as *const [u8]) };
-            print!("{}", String::from_utf8_lossy(sub));
+    for msg in receiver.into_iter() {
+        let (cid_m, cid_l) = msg.customer_id.as_u64_pair();
+        let (sid_m, sid_l) = msg.server_id.unwrap_or_default().as_u64_pair();
+        let payload = match msg.payload {
+            Some(i) => {
+                debug_assert!(i <= i32::MAX as u32);
+                i as i32
+            }
+            None => -1,
+        };
+
+        // long responsePtr
+        // int kind
+        // long customerL
+        // long customerM
+        // boolean hasServerId
+        // long serverL
+        // long serverM
+        // int payload
+        // SAFETY: the JMethodID is valid and the argument / return types match
+        let result = unsafe {
+            env.new_object_unchecked(
+                &mock_request_cls,
+                mock_request_init,
+                &[
+                    JValue::Long(channel_to_jni(msg.response_channel)).as_jni(),
+                    JValue::Int(msg.kind as jint).as_jni(),
+                    JValue::Long(cid_m as jlong).as_jni(),
+                    JValue::Long(cid_l as jlong).as_jni(),
+                    JValue::Bool(msg.server_id.is_some() as jboolean).as_jni(),
+                    JValue::Long(sid_l as jlong).as_jni(),
+                    JValue::Long(sid_m as jlong).as_jni(),
+                    JValue::Int(payload).as_jni(),
+                ],
+            )
+        };
+        let rq_obj = match result {
+            Ok(obj) => obj,
+            Err(err) => {
+                print_sender.send((err.to_string(), PrintKind::Panic)).ok();
+                return;
+            }
+        };
+
+        // SAFETY: the JMethodID is valid and the argument / return types match
+        let result = unsafe {
+            env.call_method_unchecked(
+                &request_handler,
+                request_handler_handle,
+                ReturnType::Primitive(Primitive::Void),
+                &[JValue::Object(&rq_obj).as_jni()],
+            )
+        };
+        if let Err(err) = result {
+            print_sender.send((err.to_string(), PrintKind::Panic)).ok();
+            return;
         }
     }
 }
 
 #[no_mangle]
-extern "system" fn Java_com_pseuco_cp24_request_MockRequest_writeErr<'local>(
+unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_printByte<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    stream: jlong,
+    is_error: jboolean,
+    byte: jint,
+) {
+    let bytes = &[byte as u32 as u8];
+    let msg = String::from_utf8_lossy(bytes);
+    if stream == 0 {
+        if is_error == 0 {
+            print!("{msg}");
+        } else {
+            eprint!("{msg}");
+        }
+    } else {
+        // SAFETY: The Java side guarantees `stream` to be a valid pointer. (We
+        // don’t drop the channel until the shutdown has completed and the
+        // address is removed from the `printChannels` map there.)
+        let stream: &PrintSender = unsafe { &*sptr::from_exposed_addr(stream as u64 as usize) };
+        let kind = if is_error != 0 {
+            PrintKind::Error
+        } else {
+            PrintKind::Regular
+        };
+        stream.send((msg.into_owned(), kind)).ok();
+    }
+}
+
+#[no_mangle]
+unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_print<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
+    stream: jlong,
+    is_error: jboolean,
     bytes: JPrimitiveArray<'local, jbyte>,
     offset: jint,
     len: jint,
@@ -445,7 +482,26 @@ extern "system" fn Java_com_pseuco_cp24_request_MockRequest_writeErr<'local>(
         if let Some(sub) = bytes.get(offset..offset + len) {
             // SAFETY: `i8` and `u8` have the same data layout
             let sub = unsafe { &*(sub as *const [i8] as *const [u8]) };
-            eprint!("{}", String::from_utf8_lossy(sub));
+            let msg = String::from_utf8_lossy(sub);
+            if stream == 0 {
+                if is_error == 0 {
+                    print!("{msg}");
+                } else {
+                    eprint!("{msg}");
+                }
+            } else {
+                // SAFETY: The Java side guarantees `stream` to be a valid pointer. (We
+                // don’t drop the channel until the shutdown has completed and the
+                // address is removed from the `printChannels` map there.)
+                let stream: &PrintSender =
+                    unsafe { &*sptr::from_exposed_addr(stream as u64 as usize) };
+                let kind = if is_error != 0 {
+                    PrintKind::Error
+                } else {
+                    PrintKind::Regular
+                };
+                stream.send((msg.into_owned(), kind)).ok();
+            }
         }
     }
 }

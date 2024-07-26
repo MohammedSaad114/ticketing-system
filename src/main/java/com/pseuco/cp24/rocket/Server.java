@@ -18,7 +18,7 @@ public class Server implements Runnable {
     protected final Coordinator coordinator;
 
     /**
-     * Mailbox of the {@link Estimator}.
+     * Mailbox of the {@link Server}.
      */
     private final Mailbox<Command<Server>> mailbox = new Mailbox<>();
 

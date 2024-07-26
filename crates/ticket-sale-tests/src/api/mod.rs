@@ -11,10 +11,14 @@ use uuid::Uuid;
 pub mod jni;
 pub mod mock;
 
+/// Error sent by the ticket sales system
 #[derive(Debug, Error)]
 #[error("Error 400: {0}")]
 pub struct ApiError(String);
 
+/// Result type for API requests
+///
+/// `Err(..)` is an error sent by the ticket sales system
 pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
 #[derive(Debug)]
@@ -43,20 +47,24 @@ impl Response {
                 msg,
                 server_id,
                 customer_id,
-            } => ApiResponse {
-                server_id,
-                customer_id: Some(customer_id),
-                result: Err(ApiError(msg)),
-            },
+            } => {
+                ApiResponse {
+                    server_id,
+                    customer_id: Some(customer_id),
+                    result: Err(ApiError(msg)),
+                }
+            }
             Response::Int {
                 i,
                 server_id,
                 customer_id,
-            } => ApiResponse {
-                server_id,
-                customer_id: Some(customer_id),
-                result: Ok(i as usize),
-            },
+            } => {
+                ApiResponse {
+                    server_id,
+                    customer_id: Some(customer_id),
+                    result: Ok(i as usize),
+                }
+            }
             resp => panic!("{rq_kind:?} must not be answered by {resp:?}"),
         }
     }
@@ -67,20 +75,24 @@ impl Response {
                 msg,
                 server_id,
                 customer_id,
-            } => ApiResponse {
-                server_id,
-                customer_id: Some(customer_id),
-                result: Err(ApiError(msg)),
-            },
+            } => {
+                ApiResponse {
+                    server_id,
+                    customer_id: Some(customer_id),
+                    result: Err(ApiError(msg)),
+                }
+            }
             Response::Int {
                 i,
                 server_id,
                 customer_id,
-            } => ApiResponse {
-                server_id,
-                customer_id: Some(customer_id),
-                result: Ok(i as u64),
-            },
+            } => {
+                ApiResponse {
+                    server_id,
+                    customer_id: Some(customer_id),
+                    result: Ok(i as u64),
+                }
+            }
             resp => panic!("{rq_kind:?} must not be answered by {resp:?}"),
         }
     }
@@ -94,6 +106,7 @@ struct RequestMsg {
     response_channel: oneshot::Sender<Response>,
 }
 
+/// API to interact with the ticket sales system
 pub struct Api {
     /// One channel per balancer thread
     channels: Arc<Vec<Sender<RequestMsg>>>,
@@ -148,18 +161,38 @@ impl Api {
         Ok(receiver.await?)
     }
 
+    /// Get the number of active (i.e., non-terminating) servers
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn get_num_servers(&self) -> Result<ApiResponse<usize>> {
         let kind = RequestKind::GetNumServers;
         let response = self.make_request(kind, None, &NO_REQUEST_OPTIONS);
         Ok(response.await?.into_api_response_usize(kind))
     }
 
+    /// Scale the ticket system to the provided number of active servers
+    ///
+    /// The response should always be the requested number of servers.
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn post_num_servers(&self, number: usize) -> Result<ApiResponse<usize>> {
         let kind = RequestKind::SetNumServers;
         let response = self.make_request(kind, Some(number as u32), &NO_REQUEST_OPTIONS);
         Ok(response.await?.into_api_response_usize(kind))
     }
 
+    /// Get a list of the active server’s IDs
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn get_servers(&self) -> Result<ApiResponse<Vec<Uuid>>> {
         let kind = RequestKind::GetServers;
         let response = self.make_request(kind, None, &NO_REQUEST_OPTIONS);
@@ -168,20 +201,30 @@ impl Api {
                 msg,
                 server_id,
                 customer_id,
-            } => ApiResponse {
-                server_id,
-                customer_id: Some(customer_id),
-                result: Err(ApiError(msg)),
-            },
-            Response::ServerList(list) => ApiResponse {
-                server_id: None,
-                customer_id: None,
-                result: Ok(list),
-            },
+            } => {
+                ApiResponse {
+                    server_id,
+                    customer_id: Some(customer_id),
+                    result: Err(ApiError(msg)),
+                }
+            }
+            Response::ServerList(list) => {
+                ApiResponse {
+                    server_id: None,
+                    customer_id: None,
+                    result: Ok(list),
+                }
+            }
             resp => panic!("{kind:?} must not be answered by {resp:?}"),
         })
     }
 
+    /// Get an estimate on the number of available tickets
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn get_available_tickets(
         &self,
         options: &RequestOptions,
@@ -191,6 +234,12 @@ impl Api {
         Ok(response.await?.into_api_response_u64(kind))
     }
 
+    /// Reserve a ticket
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn reserve_ticket(
         &self,
         options: &RequestOptions,
@@ -202,32 +251,44 @@ impl Api {
                 msg,
                 server_id,
                 customer_id,
-            } => ApiResponse {
-                server_id,
-                customer_id: Some(customer_id),
-                result: Err(ApiError(msg)),
-            },
+            } => {
+                ApiResponse {
+                    server_id,
+                    customer_id: Some(customer_id),
+                    result: Err(ApiError(msg)),
+                }
+            }
             Response::Int {
                 i,
                 server_id,
                 customer_id,
-            } => ApiResponse {
-                server_id,
-                customer_id: Some(customer_id),
-                result: Ok(Reservation::Reserved(i as u64)),
-            },
+            } => {
+                ApiResponse {
+                    server_id,
+                    customer_id: Some(customer_id),
+                    result: Ok(Reservation::Reserved(i as u64)),
+                }
+            }
             Response::SoldOut {
                 server_id,
                 customer_id,
-            } => ApiResponse {
-                server_id,
-                customer_id: Some(customer_id),
-                result: Ok(Reservation::SoldOut),
-            },
+            } => {
+                ApiResponse {
+                    server_id,
+                    customer_id: Some(customer_id),
+                    result: Ok(Reservation::SoldOut),
+                }
+            }
             resp => panic!("{kind:?} must not be answered by {resp:?}"),
         })
     }
 
+    /// Abort the purchase for the provided `ticket_id`
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn abort_purchase(
         &self,
         ticket_id: u64,
@@ -238,6 +299,12 @@ impl Api {
         Ok(response.await?.into_api_response_u64(kind))
     }
 
+    /// Buy the provided ticket
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn buy_ticket(
         &self,
         ticket_id: u64,
@@ -248,6 +315,7 @@ impl Api {
         Ok(response.await?.into_api_response_u64(kind))
     }
 
+    /// Create a user session
     pub fn create_user_session(&self, server_id: Option<Uuid>) -> UserSession {
         let mut bytes = [0u8; 16];
         nanorand::tls_rng().fill(&mut bytes);
@@ -260,13 +328,20 @@ impl Api {
     }
 }
 
+/// Response of the ticket sales system
 pub struct ApiResponse<T> {
+    /// ID of the responding server
     pub server_id: Option<Uuid>,
+    /// ID assigned to the customer
     pub customer_id: Option<Uuid>,
+    /// Main part of the message
     pub result: ApiResult<T>,
 }
 
 impl<T> ApiResponse<T> {
+    /// Map the message of a response
+    ///
+    /// Returns `Err(err)` iff `self.result` is `Some(msg)` and `func(msg)` is `Err(err)`.
     pub fn map_response<R, F: FnOnce(T) -> Result<R>>(self, func: F) -> Result<ApiResponse<R>> {
         let result = match self.result.map(func) {
             Ok(result) => Ok(result?),
@@ -280,17 +355,24 @@ impl<T> ApiResponse<T> {
     }
 }
 
+/// Response body for a [reserve][UserSession::reserve_ticket] request
 pub enum Reservation {
+    /// No tickets are a available anymore
     SoldOut,
+    /// The reservation was successful and resulted in
     Reserved(u64),
 }
 
 impl Reservation {
+    /// Convert a [`Reservation`] message into a [`Result`], allowing easy error
+    /// propagation
     pub fn reserved(&self) -> Result<u64> {
         match self {
-            Reservation::SoldOut => Err(eyre::eyre!(
-                "Reservation failed when it shall have succeeded."
-            )),
+            Reservation::SoldOut => {
+                Err(eyre::eyre!(
+                    "Reservation failed when it shall have succeeded."
+                ))
+            }
             Reservation::Reserved(ticket_id) => Ok(*ticket_id),
         }
     }
@@ -307,15 +389,27 @@ impl FromStr for Reservation {
     }
 }
 
+/// State of the [`UserSession`]
 pub enum SessionState {
+    /// No ticket reserved
     None,
+    /// ID of the reserved ticket
     Reserved(u64),
 }
 
+/// Session state a (proper) client keeps track of
+///
+/// Provides wrappers around the user [`Api`] methods that handle the [`RequestOptions`]
+/// accordingly.
 pub struct UserSession<'a> {
+    /// Associated [`Api`]
     pub api: &'a Api,
+    /// ID assigned to the customer. A proper client never changes this.
     pub customer_id: Uuid,
+    /// ID of the server that processed the last request. Should be `Some(..)` after the
+    /// first response.
     pub server_id: Option<Uuid>,
+    /// Whether the client holds a reservation
     pub state: SessionState,
 }
 
@@ -332,6 +426,12 @@ impl<'a> UserSession<'a> {
         response
     }
 
+    /// Get an estimate on the number of available tickets
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn get_available_tickets(&mut self) -> Result<ApiResponse<u64>> {
         Ok(self.process_response(
             self.api
@@ -340,6 +440,12 @@ impl<'a> UserSession<'a> {
         ))
     }
 
+    /// Reserve a ticket
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn reserve_ticket(&mut self) -> Result<ApiResponse<Reservation>> {
         let response: ApiResponse<Reservation> =
             self.process_response(self.api.reserve_ticket(&self.request_options()).await?);
@@ -356,6 +462,12 @@ impl<'a> UserSession<'a> {
         Ok(response)
     }
 
+    /// Abort the purchase for the provided `ticket_id`
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn abort_purchase(&mut self, ticket_id: u64) -> Result<ApiResponse<u64>> {
         Ok(self.process_response(
             self.api
@@ -364,6 +476,12 @@ impl<'a> UserSession<'a> {
         ))
     }
 
+    /// Buy the provided ticket
+    ///
+    /// Returns `Err(..)` if the request itself failed, e.g., there was no
+    /// response at all. If the ticket sales system responded with an error
+    /// message, the [`ApiResult`] inside the [`ApiResponse`] will be an
+    /// `Err(..)`.
     pub async fn buy_ticket(&mut self, ticket_id: u64) -> Result<ApiResponse<u64>> {
         Ok(self.process_response(
             self.api
@@ -373,8 +491,18 @@ impl<'a> UserSession<'a> {
     }
 }
 
+/// Options sent along with a request
 #[derive(Copy, Clone, Default)]
 pub struct RequestOptions {
+    /// Server that should handle the request (the ticket sales system may pick another
+    /// server under circumstances)
     pub server_id: Option<Uuid>,
+    /// ID assigned to a customer
     pub customer_id: Option<Uuid>,
+}
+
+fn check_send_result<T: std::fmt::Debug>(result: Result<(), T>) {
+    if let Err(err) = result {
+        eprintln!("WARNING: Tester did not await response `{err:?}`");
+    }
 }

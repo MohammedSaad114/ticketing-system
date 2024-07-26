@@ -14,11 +14,6 @@ pub struct Estimator {
 }
 
 impl Estimator {
-    /// The estimator's main routine.
-    ///
-    /// `roundtrip_secs` is the time in seconds the estimator needs to contact all
-    /// servers. If there are `N` servers, then the estimator should wait
-    /// `roundtrip_secs / N` between each server when collecting statistics.
     pub fn new(
         coordinator: Arc<Coordinator>,
         database: Arc<Mutex<Database>>,
@@ -31,7 +26,6 @@ impl Estimator {
         }
     }
 
-    /// Start the estimator
     pub fn start(&self) {
         let coordinator = self.coordinator.clone();
         let database = self.database.clone();
@@ -46,8 +40,6 @@ impl Estimator {
                     let db = database.lock().unwrap();
                     let num_available = db.get_num_available();
 
-                    // Here you would send the estimated number of tickets to the server.
-                    // For simplicity, this example just prints the information.
                     println!(
                         "Estimating: Server ID: {}, Available Tickets: {}",
                         server_id, num_available

@@ -35,68 +35,22 @@ impl Balancer {
             .cloned()
     }
 
-    fn assign_server_to_customer(&self, customer: Uuid) -> Uuid {
-        let server_id = {
-            let servers = self.coordinator.get_servers();
-            let index = rand::random::<usize>() % servers.len();
-            servers[index]
-        };
+    fn assign_server_to_customer(&self, customer: Uuid) -> Option<Uuid> {
+        let servers = self.coordinator.get_servers();
+        if servers.is_empty() {
+            return None;
+        }
+        let index = rand::random::<usize>() % servers.len();
+        let server_id = servers[index];
         self.customer_to_server
             .lock()
             .unwrap()
             .insert(customer, server_id);
-        server_id
+        Some(server_id)
     }
-    /*
-    fn terminate_server(&self, server_id: Uuid) {
-        let mut servers = self.servers.lock().unwrap();
-        if let Some(server) = servers.get_mut(&server_id) {
-            server.terminate();
-        }
-    }
-
-    fn get_num_servers(&self) -> u32 {
-        self.servers.lock().unwrap().len() as u32
-    }
-
-    fn set_num_servers(&self, num_servers: u32) {
-        let servers = self.servers.lock().unwrap();
-        let current_num_servers = servers.len() as u32;
-
-        if num_servers > current_num_servers {
-            for _ in 0..(num_servers - current_num_servers) {
-                self.allocate_server();
-            }
-        } else if num_servers < current_num_servers {
-            let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
-            for &server_id in server_ids
-                .iter()
-                .take((current_num_servers - num_servers) as usize)
-            {
-                self.terminate_server(server_id);
-            }
-        }
-    }
-
-    fn get_servers(&self) -> Vec<Uuid> {
-        self.servers.lock().unwrap().keys().cloned().collect()
-    }
-    /*
-    fn get_another_server_id(&self, excluding_id: Uuid) -> Option<Uuid> {
-        self.servers
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(&id, server)| id != excluding_id && !server.is_terminating())
-            .map(|(&id, _)| id)
-            .next()
-    }*/*/
 }
 
 impl RequestHandler for Balancer {
-    // 📌 Hint: Look into the `RequestHandler` trait definition for specification
-    // docstrings of `handle()` and `shutdown()`.
-
     fn handle(&self, mut rq: Request) {
         match rq.kind() {
             RequestKind::GetNumServers => {
@@ -106,19 +60,15 @@ impl RequestHandler for Balancer {
             RequestKind::SetNumServers => {
                 if let Some(num) = rq.read_u32() {
                     let current_num = self.coordinator.get_servers().len() as u32;
-                    match num.cmp(&current_num) {
-                        std::cmp::Ordering::Greater => {
-                            for _ in 0..(num - current_num) {
-                                self.coordinator.add_server(10);
-                            }
+                    if num > current_num {
+                        for _ in 0..(num - current_num) {
+                            self.coordinator.add_server(10);
                         }
-                        std::cmp::Ordering::Less => {
-                            let servers = self.coordinator.get_servers();
-                            for id in servers.iter().take((current_num - num) as usize) {
-                                self.coordinator.remove_server(*id);
-                            }
+                    } else if num < current_num {
+                        let servers = self.coordinator.get_servers();
+                        for id in servers.iter().take((current_num - num) as usize) {
+                            self.coordinator.remove_server(*id);
                         }
-                        std::cmp::Ordering::Equal => {}
                     }
                     rq.respond_with_int(num);
                 } else {
@@ -133,7 +83,7 @@ impl RequestHandler for Balancer {
                 let customer_id = rq.customer_id();
                 let server_id = self
                     .get_server_for_customer(customer_id)
-                    .unwrap_or_else(|| self.assign_server_to_customer(customer_id));
+                    .unwrap_or_else(|| self.assign_server_to_customer(customer_id).unwrap());
                 rq.set_server_id(server_id);
                 self.coordinator.handle_request(rq);
             }

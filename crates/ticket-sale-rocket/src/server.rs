@@ -18,7 +18,7 @@ pub struct Server {
     database: Arc<Mutex<Database>>,
 
     allocated_tickets: Vec<u32>,
-    reservations: HashMap<Uuid, SystemTime>,
+    reservations: HashMap<Uuid, (u32, SystemTime)>,
     reservation_timeout: u32,
     terminating: bool,
 }
@@ -90,8 +90,8 @@ impl Server {
                     if !self.allocated_tickets.is_empty() {
                         let ticket = self.allocated_tickets.pop().unwrap();
                         let now = SystemTime::now();
-                        self.reservations.insert(rq.customer_id(), now);
-                        rq.respond_with_string(format!("Ticket {} reserved successfully", ticket));
+                        self.reservations.insert(rq.customer_id(), (ticket, now));
+                        rq.respond_with_int(ticket); // Ensure response is an integer
                     } else {
                         let mut allocated_tickets = {
                             let mut db = self.database.lock().unwrap();
@@ -117,18 +117,20 @@ impl Server {
     }
 
     fn handle_reservation_request(&mut self, rq: Request) {
-        if let Some(reservation_time) = self.reservations.remove(&rq.customer_id()) {
+        if let Some((ticket, reservation_time)) = self.reservations.remove(&rq.customer_id()) {
             if rq.kind() == &RequestKind::BuyTicket {
                 if reservation_time.elapsed().unwrap_or_default().as_secs()
                     > self.reservation_timeout as u64
                 {
                     rq.respond_with_err("Reservation expired");
+                    self.allocated_tickets.push(ticket); // Return ticket to available
+                                                         // pool if expired
                 } else {
-                    rq.respond_with_string("Ticket purchased successfully");
+                    rq.respond_with_int(ticket); // Respond with the ticket number
                 }
             } else if rq.kind() == &RequestKind::AbortPurchase {
-                self.database.lock().unwrap().deallocate(&[1]);
-                rq.respond_with_string("Purchase aborted successfully");
+                self.database.lock().unwrap().deallocate(&[ticket]);
+                rq.respond_with_int(ticket); // Ensure response is an integer
             }
         } else {
             rq.respond_with_err("No reservation found");
@@ -140,7 +142,7 @@ impl Server {
         let expired: Vec<Uuid> = self
             .reservations
             .iter()
-            .filter(|(_, &time)| {
+            .filter(|(_, &(_, time))| {
                 now.duration_since(time).unwrap_or_default().as_secs()
                     > self.reservation_timeout as u64
             })
@@ -148,8 +150,9 @@ impl Server {
             .collect();
 
         for id in expired {
-            self.reservations.remove(&id);
-            self.allocated_tickets.push(1); // return ticket to allocated tickets
+            if let Some((ticket, _)) = self.reservations.remove(&id) {
+                self.allocated_tickets.push(ticket); // return ticket to allocated tickets
+            }
         }
     }
 }

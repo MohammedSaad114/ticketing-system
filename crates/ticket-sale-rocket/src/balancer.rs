@@ -16,18 +16,13 @@ use super::coordinator::Coordinator;
 pub struct Balancer {
     coordinator: Arc<Coordinator>,
     customer_to_server: Arc<Mutex<HashMap<Uuid, Uuid>>>,
-    estimator_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl Balancer {
-    pub fn new(
-        coordinator: Arc<Coordinator>,
-        estimator_handle: std::thread::JoinHandle<()>,
-    ) -> Self {
+    pub fn new(coordinator: Arc<Coordinator>) -> Self {
         Self {
             coordinator,
             customer_to_server: Arc::new(Mutex::new(HashMap::new())),
-            estimator_handle: Arc::new(Mutex::new(Some(estimator_handle))),
         }
     }
 
@@ -46,7 +41,8 @@ impl Balancer {
                 let index = rand::random::<usize>() % servers.len();
                 servers[index]
             } else {
-                panic!("No servers available.");
+                eprintln!("Error: No servers available.");
+                return Default::default();
             }
         };
         self.customer_to_server
@@ -91,10 +87,11 @@ impl RequestHandler for Balancer {
     }
 
     fn shutdown(self) {
-        self.coordinator.shutdown();
-
-        if let Some(handle) = self.estimator_handle.lock().unwrap().take() {
-            handle.join().expect("Estimator thread panicked");
+        let servers = self.coordinator.get_servers();
+        for id in servers {
+            if let Some(server) = self.coordinator.get_server(id) {
+                server.lock().unwrap().terminate();
+            }
         }
     }
 }

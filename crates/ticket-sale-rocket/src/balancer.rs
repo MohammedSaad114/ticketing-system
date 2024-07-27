@@ -69,22 +69,8 @@ impl RequestHandler for Balancer {
             }
             RequestKind::SetNumServers => {
                 if let Some(num) = rq.read_u32() {
-                    let current_num = self.coordinator.get_servers().len() as u32;
-                    match num.cmp(&current_num) {
-                        std::cmp::Ordering::Greater => {
-                            for _ in 0..(num - current_num) {
-                                self.coordinator.add_server(10);
-                            }
-                        }
-                        std::cmp::Ordering::Less => {
-                            let servers = self.coordinator.get_servers();
-                            for id in servers.iter().take((current_num - num) as usize) {
-                                self.coordinator.remove_server(*id);
-                            }
-                        }
-                        _ => {}
-                    }
-                    rq.respond_with_int(num);
+                    let adjusted_count = self.coordinator.adjust_server_count(num);
+                    rq.respond_with_int(adjusted_count);
                 } else {
                     rq.respond_with_err("No number of servers provided");
                 }

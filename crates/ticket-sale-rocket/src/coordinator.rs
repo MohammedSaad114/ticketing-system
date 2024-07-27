@@ -80,6 +80,38 @@ impl Coordinator {
         }
     }
 
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn running(&self) -> Arc<AtomicBool> {
+        self.running.clone()
+    }
+
+    pub fn adjust_server_count(&self, target_count: u32) -> u32 {
+        let servers = self.servers.lock().unwrap();
+        let current_count = servers.len() as u32;
+
+        match target_count.cmp(&current_count) {
+            std::cmp::Ordering::Greater => {
+                for _ in 0..(target_count - current_count) {
+                    self.add_server(10);
+                }
+            }
+            std::cmp::Ordering::Less => {
+                let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
+                for id in server_ids
+                    .iter()
+                    .take((current_count - target_count) as usize)
+                {
+                    self.remove_server(*id);
+                }
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+        target_count
+    }
+
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::SeqCst);
         let servers = self.get_servers();
@@ -88,13 +120,5 @@ impl Coordinator {
                 server.lock().unwrap().terminate();
             }
         }
-    }
-
-    pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
-    }
-
-    pub fn running(&self) -> Arc<AtomicBool> {
-        self.running.clone()
     }
 }

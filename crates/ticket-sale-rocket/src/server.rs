@@ -99,7 +99,7 @@ impl Server {
                         let ticket = self.allocated_tickets.pop().unwrap();
                         let now = SystemTime::now();
                         self.reservations.insert(rq.customer_id(), (ticket, now));
-                        rq.respond_with_int(ticket); // Ensure response is an integer
+                        rq.respond_with_int(ticket);
                     } else {
                         let mut allocated_tickets = {
                             let mut db = self.database.lock().unwrap();
@@ -107,7 +107,6 @@ impl Server {
                         };
                         self.allocated_tickets.append(&mut allocated_tickets);
 
-                        // Now we can handle the request again after allocating tickets
                         self.handle_request(rq);
                     }
                 }
@@ -131,13 +130,13 @@ impl Server {
                     > self.reservation_timeout as u64
                 {
                     rq.respond_with_err("Reservation expired");
-                    self.allocated_tickets.push(ticket); // Return ticket to available
+                    self.allocated_tickets.push(ticket);
                 } else {
-                    rq.respond_with_int(ticket); // Respond with the ticket number
+                    rq.respond_with_int(ticket);
                 }
             } else if rq.kind() == &RequestKind::AbortPurchase {
                 self.database.lock().unwrap().deallocate(&[ticket]);
-                rq.respond_with_int(ticket); // Ensure response is an integer
+                rq.respond_with_int(ticket);
             }
         } else {
             rq.respond_with_err("No reservation found");
@@ -158,7 +157,7 @@ impl Server {
 
         for id in expired {
             if let Some((ticket, _)) = self.reservations.remove(&id) {
-                self.allocated_tickets.push(ticket); // return ticket to allocated tickets
+                self.allocated_tickets.push(ticket);
             }
         }
     }

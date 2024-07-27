@@ -104,7 +104,6 @@ impl RequestHandler for Balancer {
     }
 
     fn shutdown(self) {
-        // Wait for all servers to finish processing
         let servers = self.coordinator.get_servers();
         for id in servers {
             if let Some(server) = self.coordinator.get_server(id) {

@@ -74,7 +74,6 @@ impl Server {
     pub fn update_estimate(&mut self, db_available: u32) {
         self.estimated_tickets = db_available + self.allocated_tickets.len() as u32;
     }
-
     /// Handle a [`Request`]
     fn handle_request(&mut self, rq: Request) {
         self.clean_expired_reservations();
@@ -106,7 +105,6 @@ impl Server {
                             db.allocate(10)
                         };
                         self.allocated_tickets.append(&mut allocated_tickets);
-
                         self.handle_request(rq);
                     }
                 }
@@ -122,7 +120,6 @@ impl Server {
             }
         }
     }
-
     fn handle_reservation_request(&mut self, rq: Request) {
         if let Some((ticket, reservation_time)) = self.reservations.remove(&rq.customer_id()) {
             if rq.kind() == &RequestKind::BuyTicket {

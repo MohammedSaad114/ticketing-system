@@ -49,13 +49,12 @@ impl Estimator {
                 };
 
                 for server_id in servers {
-                    // Send the estimated number of tickets to the server
                     if let Some(server) = coordinator.get_server(server_id) {
                         server.lock().unwrap().update_estimate(db_available);
                     }
 
                     thread::sleep(std::time::Duration::from_secs(
-                        (roundtrip_secs / num_servers) as u64,
+                        (roundtrip_secs / num_servers).max(1) as u64,
                     ));
                 }
             }

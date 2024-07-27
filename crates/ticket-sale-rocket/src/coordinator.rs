@@ -1,4 +1,5 @@
 //! Implementation of the coordinator
+//! coordinator.rs
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -1,4 +1,5 @@
 //! Implementation of the estimator
+//! estimator.rs
 
 use std::sync::{Arc, Mutex};
 use std::thread;

@@ -1,6 +1,6 @@
 //! Implementation of the central database for tickets
+//! database.rs
 
-/// Implementation of the central database for tickets
 #[derive(Clone)]
 pub struct Database {
     /// List of available tickets that have not yet been allocated by any server

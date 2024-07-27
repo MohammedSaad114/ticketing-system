@@ -1,4 +1,5 @@
 //! Implementation of the server
+//! server.rs
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

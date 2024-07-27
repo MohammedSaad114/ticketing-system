@@ -1,4 +1,5 @@
 //! 🚀 Your implementation of the ticket sales system must go here.
+//! lib.rs
 //!
 //! We already provide you with a skeleton of classes for the components of the
 //! system: The [database], [load balancer][balancer], [coordinator],
@@ -45,13 +46,8 @@ pub fn launch(config: &Config) -> Balancer {
         config.estimator_roundtrip_time,
     );
 
-    // Launch estimator
+    // Launch coordinator and estimator
     estimator.start();
-
-    // Add initial servers
-    for _ in 0..config.initial_servers {
-        coordinator.add_server(10);
-    }
 
     balancer
 }

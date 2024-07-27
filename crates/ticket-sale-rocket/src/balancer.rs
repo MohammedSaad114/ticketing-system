@@ -1,4 +1,5 @@
 //! Implementation of the load balancer
+//! balancer.rs
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -68,15 +69,19 @@ impl RequestHandler for Balancer {
             RequestKind::SetNumServers => {
                 if let Some(num) = rq.read_u32() {
                     let current_num = self.coordinator.get_servers().len() as u32;
-                    if num > current_num {
-                        for _ in 0..(num - current_num) {
-                            self.coordinator.add_server(10);
+                    match num.cmp(&current_num) {
+                        std::cmp::Ordering::Greater => {
+                            for _ in 0..(num - current_num) {
+                                self.coordinator.add_server(10);
+                            }
                         }
-                    } else if num < current_num {
-                        let servers = self.coordinator.get_servers();
-                        for id in servers.iter().take((current_num - num) as usize) {
-                            self.coordinator.remove_server(*id);
+                        std::cmp::Ordering::Less => {
+                            let servers = self.coordinator.get_servers();
+                            for id in servers.iter().take((current_num - num) as usize) {
+                                self.coordinator.remove_server(*id);
+                            }
                         }
+                        _ => {}
                     }
                     rq.respond_with_int(num);
                 } else {

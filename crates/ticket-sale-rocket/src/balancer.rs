@@ -1,6 +1,5 @@
 //! Implementation of the load balancer
 //! balancer.rs
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -17,14 +16,18 @@ use super::coordinator::Coordinator;
 pub struct Balancer {
     coordinator: Arc<Coordinator>,
     customer_to_server: Arc<Mutex<HashMap<Uuid, Uuid>>>,
+    estimator_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl Balancer {
-    /// Create a new [`Balancer`]
-    pub fn new(coordinator: Arc<Coordinator>) -> Self {
+    pub fn new(
+        coordinator: Arc<Coordinator>,
+        estimator_handle: std::thread::JoinHandle<()>,
+    ) -> Self {
         Self {
             coordinator,
             customer_to_server: Arc::new(Mutex::new(HashMap::new())),
+            estimator_handle: Arc::new(Mutex::new(Some(estimator_handle))),
         }
     }
 
@@ -43,9 +46,7 @@ impl Balancer {
                 let index = rand::random::<usize>() % servers.len();
                 servers[index]
             } else {
-                // Handle the case when servers is empty
-                eprintln!("Error: No servers available.");
-                return Default::default(); // or handle the error condition appropriately
+                panic!("No servers available.");
             }
         };
         self.customer_to_server
@@ -104,11 +105,10 @@ impl RequestHandler for Balancer {
     }
 
     fn shutdown(self) {
-        let servers = self.coordinator.get_servers();
-        for id in servers {
-            if let Some(server) = self.coordinator.get_server(id) {
-                server.lock().unwrap().terminate();
-            }
+        self.coordinator.shutdown();
+
+        if let Some(handle) = self.estimator_handle.lock().unwrap().take() {
+            handle.join().expect("Estimator thread panicked");
         }
     }
 }

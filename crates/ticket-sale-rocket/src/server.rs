@@ -26,7 +26,6 @@ pub struct Server {
 }
 
 impl Server {
-    /// Create a new [`Server`]
     pub fn new(
         database: Arc<Mutex<Database>>,
         initial_allocation: u32,
@@ -70,11 +69,10 @@ impl Server {
         self.handle_request(rq);
     }
 
-    /// Update the estimate of available tickets from the estimator
     pub fn update_estimate(&mut self, db_available: u32) {
         self.estimated_tickets = db_available + self.allocated_tickets.len() as u32;
     }
-    /// Handle a [`Request`]
+
     fn handle_request(&mut self, rq: Request) {
         self.clean_expired_reservations();
 
@@ -94,8 +92,7 @@ impl Server {
                     rq.respond_with_int(available_tickets + self.estimated_tickets);
                 }
                 RequestKind::ReserveTicket => {
-                    if !self.allocated_tickets.is_empty() {
-                        let ticket = self.allocated_tickets.pop().unwrap();
+                    if let Some(ticket) = self.allocated_tickets.pop() {
                         let now = SystemTime::now();
                         self.reservations.insert(rq.customer_id(), (ticket, now));
                         rq.respond_with_int(ticket);
@@ -120,6 +117,7 @@ impl Server {
             }
         }
     }
+
     fn handle_reservation_request(&mut self, rq: Request) {
         if let Some((ticket, reservation_time)) = self.reservations.remove(&rq.customer_id()) {
             if rq.kind() == &RequestKind::BuyTicket {

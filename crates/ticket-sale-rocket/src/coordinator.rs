@@ -2,7 +2,10 @@
 //! coordinator.rs
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 use ticket_sale_core::Request;
 use uuid::Uuid;
@@ -22,6 +25,7 @@ pub struct Coordinator {
 
     /// Map of active servers
     servers: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Server>>>>>,
+    running: Arc<AtomicBool>,
 }
 
 impl Coordinator {
@@ -31,10 +35,10 @@ impl Coordinator {
             reservation_timeout,
             database,
             servers: Arc::new(Mutex::new(HashMap::new())),
+            running: Arc::new(AtomicBool::new(true)),
         }
     }
 
-    /// Add a new server to the coordinator
     pub fn add_server(&self, initial_allocation: u32) -> Uuid {
         let server = Arc::new(Mutex::new(Server::new(
             self.database.clone(),
@@ -46,10 +50,12 @@ impl Coordinator {
         id
     }
 
-    /// Remove a server from the coordinator
     pub fn remove_server(&self, id: Uuid) {
-        let mut servers = self.servers.lock().unwrap();
-        if let Some(server) = servers.remove(&id) {
+        let server = {
+            let mut servers = self.servers.lock().unwrap();
+            servers.remove(&id)
+        };
+        if let Some(server) = server {
             server.lock().unwrap().terminate();
         }
     }
@@ -72,5 +78,23 @@ impl Coordinator {
         } else {
             rq.respond_with_err("No server ID provided");
         }
+    }
+
+    pub fn shutdown(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        let servers = self.get_servers();
+        for id in servers {
+            if let Some(server) = self.get_server(id) {
+                server.lock().unwrap().terminate();
+            }
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn running(&self) -> Arc<AtomicBool> {
+        self.running.clone()
     }
 }

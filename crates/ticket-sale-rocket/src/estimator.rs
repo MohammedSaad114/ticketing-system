@@ -1,13 +1,14 @@
 //! Implementation of the estimator
 //! estimator.rs
 
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::sync::{atomic::Ordering, Arc, Mutex};
+use std::time::Duration;
 
 use super::coordinator::Coordinator;
 use super::database::Database;
 
 /// Estimator that estimates the number of tickets available overall
+
 pub struct Estimator {
     coordinator: Arc<Coordinator>,
     database: Arc<Mutex<Database>>,
@@ -32,16 +33,21 @@ impl Estimator {
         }
     }
 
-    /// Start the estimator
-    pub fn start(&self) {
+    pub fn start(&self) -> std::thread::JoinHandle<()> {
         let coordinator = self.coordinator.clone();
         let database = self.database.clone();
         let roundtrip_secs = self.roundtrip_secs;
+        let running = coordinator.running();
 
-        thread::spawn(move || {
-            loop {
+        std::thread::spawn(move || {
+            while running.load(Ordering::SeqCst) {
                 let servers = coordinator.get_servers();
                 let num_servers = servers.len() as u32;
+
+                if num_servers == 0 {
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
 
                 let db_available = {
                     let db = database.lock().unwrap();
@@ -53,11 +59,9 @@ impl Estimator {
                         server.lock().unwrap().update_estimate(db_available);
                     }
 
-                    thread::sleep(std::time::Duration::from_secs(
-                        (roundtrip_secs / num_servers).max(1) as u64,
-                    ));
+                    std::thread::sleep(Duration::from_secs((roundtrip_secs / num_servers) as u64));
                 }
             }
-        });
+        })
     }
 }

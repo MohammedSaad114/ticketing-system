@@ -1,3 +1,4 @@
+// server.rs
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
@@ -24,9 +25,6 @@ pub struct Server {
     /// Reservation timeout in seconds
     reservation_timeout: u32,
 
-    /// Flag indicating if the server is terminating
-    terminating: bool,
-
     /// Estimated tickets available elsewhere
     estimated_tickets: u32,
 }
@@ -37,14 +35,16 @@ impl Server {
         let id = Uuid::new_v4();
         let initial_allocation = 10; // Arbitrary initial allocation, can be adjusted as needed
         let reservation_timeout = config.timeout;
-        let allocated_tickets = database.write().unwrap().allocate(initial_allocation);
+        let allocated_tickets = {
+            let mut db = database.write().unwrap();
+            db.allocate(initial_allocation)
+        };
         Self {
             id,
             database,
             allocated_tickets,
             reservations: HashMap::new(),
             reservation_timeout,
-            terminating: false,
             estimated_tickets: 0,
         }
     }
@@ -59,19 +59,7 @@ impl Server {
                 rq.respond_with_int(available_tickets);
             }
             RequestKind::ReserveTicket => {
-                if self.allocated_tickets.is_empty() {
-                    // Try to allocate more tickets
-                    let new_tickets = self.database.write().unwrap().allocate(100); // Adjust as needed
-                    if new_tickets.is_empty() {
-                        rq.respond_with_sold_out();
-                        return;
-                    }
-                    self.allocated_tickets.extend(new_tickets);
-                }
-                let ticket = self.allocated_tickets.pop().unwrap();
-                self.reservations
-                    .insert(rq.customer_id(), (ticket, SystemTime::now()));
-                rq.respond_with_int(ticket);
+                self.reserve_ticket(rq);
             }
             RequestKind::BuyTicket => {
                 if let Some((ticket, _)) = self.reservations.remove(&rq.customer_id()) {
@@ -114,6 +102,29 @@ impl Server {
         self.allocated_tickets.extend(expired_tickets);
     }
 
+    /// Reserve a ticket for a customer
+    fn reserve_ticket(&mut self, rq: Request) {
+        if self.allocated_tickets.is_empty() {
+            // Try to allocate more tickets
+            let new_tickets = {
+                let mut db = self.database.write().unwrap();
+                db.allocate(100) // Adjust as needed
+            };
+            if new_tickets.is_empty() {
+                rq.respond_with_sold_out();
+                return;
+            }
+            self.allocated_tickets.extend(new_tickets);
+        }
+        if let Some(ticket) = self.allocated_tickets.pop() {
+            self.reservations
+                .insert(rq.customer_id(), (ticket, SystemTime::now()));
+            rq.respond_with_int(ticket);
+        } else {
+            rq.respond_with_err("Failed to allocate tickets.");
+        }
+    }
+
     pub fn get_allocated_tickets(&self) -> Vec<u32> {
         self.allocated_tickets.clone()
     }
@@ -121,15 +132,5 @@ impl Server {
     /// Update the estimated number of available tickets
     pub fn update_estimate(&mut self, db_available: u32) {
         self.estimated_tickets = db_available + self.allocated_tickets.len() as u32;
-    }
-
-    /// Handle requests when the server is terminating
-    fn handle_terminating_request(&mut self, rq: Request) {
-        match rq.kind() {
-            RequestKind::ReserveTicket => {
-                rq.respond_with_err("Server is terminating. Please try another server.");
-            }
-            _ => self.handle_request(rq),
-        }
     }
 }

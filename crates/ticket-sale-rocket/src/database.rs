@@ -1,4 +1,5 @@
 //! Implementation of the central database for tickets
+//! database.rs
 
 /// Implementation of the central database for tickets
 #[derive(Clone)]

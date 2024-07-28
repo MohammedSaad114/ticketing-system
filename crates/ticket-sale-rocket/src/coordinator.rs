@@ -1,3 +1,5 @@
+// coordinator.rs
+use std::ops::Deref;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
@@ -9,9 +11,6 @@ use super::server::Server;
 
 /// Coordinator orchestrating all the components of the system
 pub struct Coordinator {
-    /// The reservation timeout
-    reservation_timeout: u32,
-
     /// Reference to the [`Database`]
     ///
     /// To be handed over to new servers.
@@ -26,8 +25,8 @@ pub struct Coordinator {
 
 impl Coordinator {
     /// Create the [`Coordinator`]
-    pub fn new(reservation_timeout: u32, database: Database, config: &Config) -> Self {
-        let database = Arc::new(RwLock::new(database));
+    pub fn new(reservation_timeout: u32, database: Arc<RwLock<Database>>, config: &Config) -> Self {
+        let database = Arc::clone(&database);
         let config = Config {
             tickets: config.tickets,
             timeout: reservation_timeout,
@@ -47,25 +46,66 @@ impl Coordinator {
         }
 
         Self {
-            reservation_timeout,
             database,
             servers,
             running: AtomicBool::new(false),
         }
     }
 
-    /// Get a list of active servers
     pub fn get_servers(&self) -> Vec<Uuid> {
         self.servers
             .iter()
-            .map(|server| server.read().unwrap().id)
+            .map(|server| server.read().unwrap().deref().id)
             .collect()
+    }
+
+    pub fn get_server(&self, id: Uuid) -> Option<Arc<RwLock<Server>>> {
+        self.servers
+            .iter()
+            .find(|server| server.read().unwrap().id == id)
+            .cloned()
     }
 
     /// Add a new server to the list of active servers
     pub fn add_server(&mut self, config: &Config) {
         let new_server = Arc::new(RwLock::new(Server::new(Arc::clone(&self.database), config)));
         self.servers.push(new_server);
+    }
+
+    pub fn adjust_server_count(&mut self, target_count: u32, config: &Config) -> u32 {
+        let current_count = self.servers.len() as u32;
+
+        match target_count.cmp(&current_count) {
+            std::cmp::Ordering::Greater => {
+                for _ in 0..(target_count - current_count) {
+                    self.add_server(config);
+                }
+            }
+            std::cmp::Ordering::Less => {
+                let server_ids: Vec<Uuid> = self
+                    .servers
+                    .iter()
+                    .map(|server| server.read().unwrap().id)
+                    .collect();
+                for id in server_ids
+                    .iter()
+                    .take((current_count - target_count) as usize)
+                {
+                    self.remove_server(*id);
+                }
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+        target_count
+    }
+
+    pub fn remove_server(&mut self, server_id: Uuid) {
+        self.servers
+            .retain(|server| server.read().unwrap().id != server_id);
+    }
+
+    pub fn get_num_servers(&self) -> u32 {
+        self.servers.len() as u32
     }
 
     pub fn get_server_by_id(&self, server_id: Uuid) -> Option<Arc<RwLock<Server>>> {

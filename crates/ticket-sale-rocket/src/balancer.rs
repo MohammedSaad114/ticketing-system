@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use ticket_sale_core::{Request, RequestHandler, RequestKind};
+use ticket_sale_core::{Config, Request, RequestHandler, RequestKind};
 use uuid::Uuid;
 
 use super::coordinator::Coordinator;
@@ -17,17 +17,20 @@ pub struct Balancer {
     coordinator: Arc<Coordinator>,
     customer_to_server: Arc<RwLock<HashMap<Uuid, Uuid>>>,
     estimator_handle: Arc<RwLock<Option<std::thread::JoinHandle<()>>>>,
+    config: Config,
 }
 
 impl Balancer {
     pub fn new(
         coordinator: Arc<Coordinator>,
         estimator_handle: std::thread::JoinHandle<()>,
+        config: Config,
     ) -> Self {
         Self {
             coordinator,
             customer_to_server: Arc::new(RwLock::new(HashMap::new())),
             estimator_handle: Arc::new(RwLock::new(Some(estimator_handle))),
+            config,
         }
     }
 
@@ -69,7 +72,10 @@ impl RequestHandler for Balancer {
             }
             RequestKind::SetNumServers => {
                 if let Some(num) = rq.read_u32() {
-                    let adjusted_count = self.coordinator.adjust_server_count(num);
+                    let mut coordinator = Arc::clone(&self.coordinator);
+                    let adjusted_count = Arc::get_mut(&mut coordinator)
+                        .unwrap()
+                        .adjust_server_count(num, &self.config);
                     rq.respond_with_int(adjusted_count);
                 } else {
                     rq.respond_with_err("No number of servers provided");
@@ -91,8 +97,6 @@ impl RequestHandler for Balancer {
     }
 
     fn shutdown(self) {
-        self.coordinator.shutdown();
-
         if let Some(handle) = self.estimator_handle.write().unwrap().take() {
             handle.join().expect("Estimator thread panicked");
         }

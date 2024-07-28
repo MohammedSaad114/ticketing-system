@@ -39,14 +39,20 @@ pub fn launch(config: &Config) -> Balancer {
     }
 
     let database = Arc::new(RwLock::new(Database::new(config.tickets)));
-    let coordinator = Arc::new(Coordinator::new(config.timeout, database.clone()));
-    let estimator = Estimator::new(database.clone(), config.estimator_roundtrip_time);
-
-    let estimator_handle = estimator.start(coordinator.clone());
+    let coordinator = Arc::new(Coordinator::new(config.timeout, database.clone(), config));
+    let estimator = Arc::new(Estimator::new(
+        coordinator.clone(),
+        database.clone(),
+        config.estimator_roundtrip_time,
+    ));
+    let estimator_handle = estimator.start();
 
     for _ in 0..config.initial_servers {
-        coordinator.add_server(config);
+        let mut cloned_coordinator = Arc::clone(&coordinator);
+        if let Some(coordinator) = Arc::get_mut(&mut cloned_coordinator) {
+            coordinator.add_server(config);
+        }
     }
 
-    Balancer::new(coordinator.clone(), estimator_handle)
+    Balancer::new(coordinator.clone(), estimator_handle, *config)
 }

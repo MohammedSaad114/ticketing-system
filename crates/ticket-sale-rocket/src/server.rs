@@ -1,11 +1,8 @@
-//! Implementation of the server
-//! server.rs
-
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
-use ticket_sale_core::{Request, RequestKind};
+use ticket_sale_core::{Config, Request, RequestKind};
 use uuid::Uuid;
 
 use super::database::Database;
@@ -18,20 +15,28 @@ pub struct Server {
     /// The database
     database: Arc<RwLock<Database>>,
 
+    /// Allocated tickets held by the server
     allocated_tickets: Vec<u32>,
+
+    /// Reservations mapping customer ID to ticket and reservation time
     reservations: HashMap<Uuid, (u32, SystemTime)>,
+
+    /// Reservation timeout in seconds
     reservation_timeout: u32,
+
+    /// Flag indicating if the server is terminating
     terminating: bool,
+
+    /// Estimated tickets available elsewhere
     estimated_tickets: u32,
 }
 
 impl Server {
-    pub fn new(
-        database: Arc<RwLock<Database>>,
-        initial_allocation: u32,
-        reservation_timeout: u32,
-    ) -> Server {
+    /// Create a new [`Server`]
+    pub fn new(database: Arc<RwLock<Database>>, config: &Config) -> Server {
         let id = Uuid::new_v4();
+        let initial_allocation = 10; // Arbitrary initial allocation, can be adjusted as needed
+        let reservation_timeout = config.timeout;
         let allocated_tickets = database.write().unwrap().allocate(initial_allocation);
         Self {
             id,
@@ -44,118 +49,83 @@ impl Server {
         }
     }
 
-    pub fn get_id(&self) -> Uuid {
-        self.id
-    }
-
-    pub fn is_terminating(&self) -> bool {
-        self.terminating
-    }
-
-    pub fn terminate(&mut self) {
-        self.terminating = true;
-        self.database
-            .write()
-            .unwrap()
-            .deallocate(&self.allocated_tickets);
-        self.allocated_tickets.clear();
-    }
-
-    pub fn can_shutdown(&self) -> bool {
-        self.reservations.is_empty()
-    }
-
-    pub fn process_request(&mut self, rq: Request) {
+    /// Handle a [`Request`]
+    fn handle_request(&mut self, rq: Request) {
         self.clean_expired_reservations();
-        if self.terminating {
-            self.handle_terminating_request(rq);
-        } else {
-            self.handle_active_request(rq);
+        match rq.kind() {
+            RequestKind::NumAvailableTickets => {
+                let available_tickets =
+                    self.allocated_tickets.len() as u32 + self.estimated_tickets;
+                rq.respond_with_int(available_tickets);
+            }
+            RequestKind::ReserveTicket => {
+                if self.allocated_tickets.is_empty() {
+                    // Try to allocate more tickets
+                    let new_tickets = self.database.write().unwrap().allocate(100); // Adjust as needed
+                    if new_tickets.is_empty() {
+                        rq.respond_with_sold_out();
+                        return;
+                    }
+                    self.allocated_tickets.extend(new_tickets);
+                }
+                let ticket = self.allocated_tickets.pop().unwrap();
+                self.reservations
+                    .insert(rq.customer_id(), (ticket, SystemTime::now()));
+                rq.respond_with_int(ticket);
+            }
+            RequestKind::BuyTicket => {
+                if let Some((ticket, _)) = self.reservations.remove(&rq.customer_id()) {
+                    rq.respond_with_int(ticket);
+                } else {
+                    rq.respond_with_err("No reservation found.");
+                }
+            }
+            RequestKind::AbortPurchase => {
+                if let Some((ticket, _)) = self.reservations.remove(&rq.customer_id()) {
+                    self.allocated_tickets.push(ticket);
+                    rq.respond_with_int(ticket);
+                } else {
+                    rq.respond_with_err("No reservation found.");
+                }
+            }
+            _ => rq.respond_with_err("Unsupported request kind."),
         }
     }
 
+    /// Clean expired reservations
+    fn clean_expired_reservations(&mut self) {
+        let now = SystemTime::now();
+        let timeout = Duration::new(self.reservation_timeout.into(), 0);
+        let mut expired_tickets = Vec::new();
+
+        self.reservations.retain(|_, &mut (ticket, reserved_at)| {
+            if now
+                .duration_since(reserved_at)
+                .unwrap_or_else(|_| Duration::new(0, 0))
+                < timeout
+            {
+                true
+            } else {
+                expired_tickets.push(ticket);
+                false
+            }
+        });
+
+        self.allocated_tickets.extend(expired_tickets);
+    }
+
+    /// Update the estimated number of available tickets
     pub fn update_estimate(&mut self, db_available: u32) {
         self.estimated_tickets = db_available + self.allocated_tickets.len() as u32;
     }
 
+    /// Handle requests when the server is terminating
     fn handle_terminating_request(&mut self, rq: Request) {
         match rq.kind() {
-            RequestKind::BuyTicket | RequestKind::AbortPurchase => {
-                self.handle_reservation_request(rq);
-            }
-            _ => {
-                rq.respond_with_err("Server is terminating");
-            }
-        }
-    }
-
-    fn handle_active_request(&mut self, rq: Request) {
-        match rq.kind() {
-            RequestKind::NumAvailableTickets => {
-                let available_tickets = self.allocated_tickets.len() as u32;
-                rq.respond_with_int(available_tickets + self.estimated_tickets);
-            }
             RequestKind::ReserveTicket => {
-                if let Some(ticket) = self.allocated_tickets.pop() {
-                    let now = SystemTime::now();
-                    self.reservations.insert(rq.customer_id(), (ticket, now));
-                    rq.respond_with_int(ticket);
-                } else {
-                    let mut allocated_tickets = {
-                        let mut db = self.database.write().unwrap();
-                        db.allocate(10)
-                    };
-                    self.allocated_tickets.append(&mut allocated_tickets);
-                    self.process_request(rq); // Retry the request after allocating more
-                                              // tickets
-                }
+                rq.respond_with_err("Server is terminating. Please try another server.");
             }
-            RequestKind::BuyTicket | RequestKind::AbortPurchase => {
-                self.handle_reservation_request(rq);
-            }
-            RequestKind::Debug => {
-                rq.respond_with_string("Debugging request handled");
-            }
-            _ => {
-                rq.respond_with_err("Invalid request for server");
-            }
-        }
-    }
-
-    fn handle_reservation_request(&mut self, rq: Request) {
-        if let Some((ticket, reservation_time)) = self.reservations.remove(&rq.customer_id()) {
-            if reservation_time.elapsed().unwrap_or_default().as_secs()
-                > self.reservation_timeout as u64
-            {
-                rq.respond_with_err("Reservation expired");
-                self.allocated_tickets.push(ticket);
-            } else if rq.kind() == &RequestKind::BuyTicket {
-                rq.respond_with_int(ticket);
-            } else if rq.kind() == &RequestKind::AbortPurchase {
-                self.database.write().unwrap().deallocate(&[ticket]);
-                rq.respond_with_int(ticket);
-            }
-        } else {
-            rq.respond_with_err("No reservation found");
-        }
-    }
-
-    fn clean_expired_reservations(&mut self) {
-        let now = SystemTime::now();
-        let expired: Vec<Uuid> = self
-            .reservations
-            .iter()
-            .filter(|(_, &(_, time))| {
-                now.duration_since(time).unwrap_or_default().as_secs()
-                    > self.reservation_timeout as u64
-            })
-            .map(|(&id, _)| id)
-            .collect();
-
-        for id in expired {
-            if let Some((ticket, _)) = self.reservations.remove(&id) {
-                self.allocated_tickets.push(ticket);
-            }
+            _ => self.handle_request(rq),
         }
     }
 }

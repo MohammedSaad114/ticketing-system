@@ -114,6 +114,11 @@ impl Server {
         self.allocated_tickets.extend(expired_tickets);
     }
 
+    /// Get the current allocated tickets
+    pub fn get_allocated_tickets(&self) -> &[u32] {
+        &self.allocated_tickets
+    }
+
     /// Update the estimated number of available tickets
     pub fn update_estimate(&mut self, db_available: u32) {
         self.estimated_tickets = db_available + self.allocated_tickets.len() as u32;

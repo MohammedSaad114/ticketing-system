@@ -2,7 +2,7 @@
 //! server.rs
 
 use std::collections::HashMap;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use ticket_sale_core::{Request, RequestKind};
@@ -124,15 +124,13 @@ impl Server {
 
     fn handle_reservation_request(&mut self, rq: Request) {
         if let Some((ticket, reservation_time)) = self.reservations.remove(&rq.customer_id()) {
-            if rq.kind() == &RequestKind::BuyTicket {
-                if reservation_time.elapsed().unwrap_or_default().as_secs()
-                    > self.reservation_timeout as u64
-                {
-                    rq.respond_with_err("Reservation expired");
-                    self.allocated_tickets.push(ticket);
-                } else {
-                    rq.respond_with_int(ticket);
-                }
+            if reservation_time.elapsed().unwrap_or_default().as_secs()
+                > self.reservation_timeout as u64
+            {
+                rq.respond_with_err("Reservation expired");
+                self.allocated_tickets.push(ticket);
+            } else if rq.kind() == &RequestKind::BuyTicket {
+                rq.respond_with_int(ticket);
             } else if rq.kind() == &RequestKind::AbortPurchase {
                 self.database.write().unwrap().deallocate(&[ticket]);
                 rq.respond_with_int(ticket);

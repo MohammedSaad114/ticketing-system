@@ -20,6 +20,7 @@ mod balancer;
 mod coordinator;
 mod database;
 mod estimator;
+mod priority;
 mod server;
 
 pub use balancer::Balancer;

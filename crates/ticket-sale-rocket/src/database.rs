@@ -35,6 +35,8 @@ impl Database {
         tickets
     }
 
+    /// first commit by Wadahh
+
     /// Deallocate `tickets`.
     ///
     /// The tickets are added to the database.

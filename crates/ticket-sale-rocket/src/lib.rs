@@ -52,4 +52,5 @@ pub fn launch(config: &Config) -> Balancer {
     estimator.start();
 
     Balancer::new(coordinator.clone())
+    //testing
 }

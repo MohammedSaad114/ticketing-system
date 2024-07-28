@@ -6,11 +6,8 @@ use std::time::Duration;
 
 use super::coordinator::Coordinator;
 use super::database::Database;
-
 /// Estimator that estimates the number of tickets available overall
-
 pub struct Estimator {
-    coordinator: Arc<Coordinator>,
     database: Arc<RwLock<Database>>,
     roundtrip_secs: u32,
 }
@@ -21,20 +18,14 @@ impl Estimator {
     /// `roundtrip_secs` is the time in seconds the estimator needs to contact all
     /// servers. If there are `N` servers, then the estimator should wait
     /// `roundtrip_secs / N` between each server when collecting statistics.
-    pub fn new(
-        coordinator: Arc<Coordinator>,
-        database: Arc<RwLock<Database>>,
-        roundtrip_secs: u32,
-    ) -> Self {
+    pub fn new(database: Arc<RwLock<Database>>, roundtrip_secs: u32) -> Self {
         Self {
-            coordinator,
             database,
             roundtrip_secs,
         }
     }
 
-    pub fn start(&self) -> std::thread::JoinHandle<()> {
-        let coordinator = self.coordinator.clone();
+    pub fn start(&self, coordinator: Arc<Coordinator>) -> std::thread::JoinHandle<()> {
         let database = self.database.clone();
         let roundtrip_secs = self.roundtrip_secs;
         let running = coordinator.running();

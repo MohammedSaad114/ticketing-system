@@ -2,7 +2,7 @@
 //! server.rs
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::SystemTime;
 
 use ticket_sale_core::{Request, RequestKind};
@@ -32,7 +32,10 @@ impl Server {
         reservation_timeout: u32,
     ) -> Server {
         let id = Uuid::new_v4();
-        let allocated_tickets = database.lock().unwrap().allocate(initial_allocation);
+        let allocated_tickets = match database.lock() {
+            Ok(mut db) => db.allocate(initial_allocation),
+            Err(PoisonError { .. }) => vec![], // handle error, maybe log it
+        };
         Self {
             id,
             database,
@@ -54,10 +57,9 @@ impl Server {
 
     pub fn terminate(&mut self) {
         self.terminating = true;
-        self.database
-            .lock()
-            .unwrap()
-            .deallocate(&self.allocated_tickets);
+        if let Ok(mut db) = self.database.lock() {
+            db.deallocate(&self.allocated_tickets);
+        }
         self.allocated_tickets.clear();
     }
 
@@ -97,9 +99,9 @@ impl Server {
                         self.reservations.insert(rq.customer_id(), (ticket, now));
                         rq.respond_with_int(ticket);
                     } else {
-                        let mut allocated_tickets = {
-                            let mut db = self.database.lock().unwrap();
-                            db.allocate(10)
+                        let mut allocated_tickets = match self.database.lock() {
+                            Ok(mut db) => db.allocate(10),
+                            Err(PoisonError { .. }) => vec![], // handle error, maybe log it
                         };
                         self.allocated_tickets.append(&mut allocated_tickets);
                         self.handle_request(rq);
@@ -130,7 +132,9 @@ impl Server {
                     rq.respond_with_int(ticket);
                 }
             } else if rq.kind() == &RequestKind::AbortPurchase {
-                self.database.lock().unwrap().deallocate(&[ticket]);
+                if let Ok(mut db) = self.database.lock() {
+                    db.deallocate(&[ticket]);
+                }
                 rq.respond_with_int(ticket);
             }
         } else {

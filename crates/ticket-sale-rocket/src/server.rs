@@ -10,7 +10,7 @@ use super::database::Database;
 /// A server in the ticket sales system
 pub struct Server {
     /// The server's ID
-    id: Uuid,
+    pub id: Uuid,
 
     /// The database
     database: Arc<RwLock<Database>>,
@@ -50,7 +50,7 @@ impl Server {
     }
 
     /// Handle a [`Request`]
-    fn handle_request(&mut self, rq: Request) {
+    pub fn handle_request(&mut self, rq: Request) {
         self.clean_expired_reservations();
         match rq.kind() {
             RequestKind::NumAvailableTickets => {

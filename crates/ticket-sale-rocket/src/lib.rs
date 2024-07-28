@@ -45,12 +45,11 @@ pub fn launch(config: &Config) -> Balancer {
         config.estimator_roundtrip_time,
     );
 
+    let estimator_handle = estimator.start();
+
     for _ in 0..config.initial_servers {
         coordinator.add_server(10);
     }
 
-    estimator.start();
-
-    Balancer::new(coordinator.clone())
-    //testing
+    Balancer::new(coordinator.clone(), estimator_handle)
 }

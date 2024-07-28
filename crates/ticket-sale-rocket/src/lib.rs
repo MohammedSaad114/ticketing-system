@@ -44,7 +44,7 @@ pub fn launch(config: &Config) -> Balancer {
     let estimator_handle = estimator.start(coordinator.clone());
 
     for _ in 0..config.initial_servers {
-        coordinator.add_server(10);
+        coordinator.add_server(config);
     }
 
     Balancer::new(coordinator.clone(), estimator_handle)

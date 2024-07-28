@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use ticket_sale_core::{Config, Request};
@@ -18,6 +19,9 @@ pub struct Coordinator {
 
     /// List of active servers
     servers: Vec<Arc<RwLock<Server>>>,
+
+    /// Flag indicating if the coordinator is running
+    running: AtomicBool,
 }
 
 impl Coordinator {
@@ -46,6 +50,7 @@ impl Coordinator {
             reservation_timeout,
             database,
             servers,
+            running: AtomicBool::new(false),
         }
     }
 
@@ -63,6 +68,13 @@ impl Coordinator {
         self.servers.push(new_server);
     }
 
+    pub fn get_server_by_id(&self, server_id: Uuid) -> Option<Arc<RwLock<Server>>> {
+        self.servers
+            .iter()
+            .find(|server| server.read().unwrap().id == server_id)
+            .cloned()
+    }
+
     /// Handle a request by forwarding it to an appropriate server
     pub fn handle_request(&self, rq: Request) {
         // For simplicity, forward the request to the first server in the list
@@ -71,5 +83,9 @@ impl Coordinator {
         } else {
             rq.respond_with_err("No servers available.");
         }
+    }
+
+    pub fn running(&self) -> &AtomicBool {
+        &self.running
     }
 }

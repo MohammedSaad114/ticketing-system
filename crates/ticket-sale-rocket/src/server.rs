@@ -114,9 +114,8 @@ impl Server {
         self.allocated_tickets.extend(expired_tickets);
     }
 
-    /// Get the current allocated tickets
-    pub fn get_allocated_tickets(&self) -> &[u32] {
-        &self.allocated_tickets
+    pub fn get_allocated_tickets(&self) -> Vec<u32> {
+        self.allocated_tickets.clone()
     }
 
     /// Update the estimated number of available tickets

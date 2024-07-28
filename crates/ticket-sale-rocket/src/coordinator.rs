@@ -1,13 +1,7 @@
-//! Implementation of the coordinator
-//! coordinator.rs
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, RwLock};
 
-use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, RwLock,
-};
-
-use ticket_sale_core::Request;
+use ticket_sale_core::{Config, Request};
 use uuid::Uuid;
 
 use super::database::Database;
@@ -23,102 +17,75 @@ pub struct Coordinator {
     /// To be handed over to new servers.
     database: Arc<RwLock<Database>>,
 
-    /// Map of active servers
-    servers: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Server>>>>>,
-    running: Arc<AtomicBool>,
+    /// List of active servers
+    servers: Vec<Arc<RwLock<Server>>>,
+
+    /// Flag indicating if the coordinator is running
+    running: AtomicBool,
 }
 
 impl Coordinator {
     /// Create the [`Coordinator`]
-    pub fn new(reservation_timeout: u32, database: Arc<RwLock<Database>>) -> Self {
+    pub fn new(reservation_timeout: u32, database: Database, config: &Config) -> Self {
+        let database = Arc::new(RwLock::new(database));
+        let config = Config {
+            tickets: config.tickets,
+            timeout: reservation_timeout,
+            initial_servers: config.initial_servers, // Assuming a default number of initial servers
+            estimator_roundtrip_time: config.estimator_roundtrip_time, /* Assuming a default                                        * estimator */
+            bonus: config.bonus,
+        };
+
+        let mut servers = Vec::new();
+
+        // Initialize the initial set of servers
+        for _ in 0..config.initial_servers {
+            servers.push(Arc::new(RwLock::new(Server::new(
+                Arc::clone(&database),
+                &config,
+            ))));
+        }
+
         Self {
             reservation_timeout,
             database,
-            servers: Arc::new(RwLock::new(HashMap::new())),
-            running: Arc::new(AtomicBool::new(true)),
+            servers,
+            running: AtomicBool::new(false),
         }
     }
 
-    pub fn add_server(&self, initial_allocation: u32) -> Uuid {
-        let server = Arc::new(RwLock::new(Server::new(
-            self.database.clone(),
-            initial_allocation,
-            self.reservation_timeout,
-        )));
-        let id = server.read().unwrap().get_id();
-        self.servers.write().unwrap().insert(id, server);
-        id
-    }
-
-    pub fn remove_server(&self, id: Uuid) {
-        let server = {
-            let mut servers = self.servers.write().unwrap();
-            servers.remove(&id)
-        };
-        if let Some(server) = server {
-            server.write().unwrap().terminate();
-        }
-    }
-
+    /// Get a list of active servers
     pub fn get_servers(&self) -> Vec<Uuid> {
-        self.servers.read().unwrap().keys().cloned().collect()
+        self.servers
+            .iter()
+            .map(|server| server.read().unwrap().id)
+            .collect()
     }
 
-    pub fn get_server(&self, id: Uuid) -> Option<Arc<RwLock<Server>>> {
-        self.servers.read().unwrap().get(&id).cloned()
+    /// Add a new server to the list of active servers
+    pub fn add_server(&mut self, config: &Config) {
+        let new_server = Arc::new(RwLock::new(Server::new(Arc::clone(&self.database), config)));
+        self.servers.push(new_server);
     }
 
+    pub fn get_server_by_id(&self, server_id: Uuid) -> Option<Arc<RwLock<Server>>> {
+        self.servers
+            .iter()
+            .find(|server| server.read().unwrap().id == server_id)
+            .cloned()
+    }
+
+    /// Handle a request by forwarding it to an appropriate server
     pub fn handle_request(&self, rq: Request) {
-        if let Some(server_id) = rq.server_id() {
-            if let Some(server) = self.get_server(server_id) {
-                server.write().unwrap().process_request(rq);
-            } else {
-                rq.respond_with_err("Server not found");
-            }
+        // For simplicity, forward the request to the first server in the list
+        if let Some(server) = self.servers.first() {
+            server.write().unwrap().handle_request(rq);
         } else {
-            rq.respond_with_err("No server ID provided");
+            rq.respond_with_err("No servers available.");
         }
     }
 
-    pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
-    }
-
-    pub fn running(&self) -> Arc<AtomicBool> {
-        self.running.clone()
-    }
-
-    pub fn adjust_server_count(&self, target_count: u32) -> u32 {
-        let servers = self.servers.write().unwrap();
-        let current_count = servers.len() as u32;
-
-        match target_count.cmp(&current_count) {
-            std::cmp::Ordering::Greater => {
-                for _ in 0..(target_count - current_count) {
-                    self.add_server(10);
-                }
-            }
-            std::cmp::Ordering::Less => {
-                let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
-                for id in server_ids
-                    .iter()
-                    .take((current_count - target_count) as usize)
-                {
-                    self.remove_server(*id);
-                }
-            }
-            std::cmp::Ordering::Equal => {}
-        }
-        target_count
-    }
-
-    pub fn shutdown(&self) {
-        self.running.store(false, Ordering::SeqCst);
-        let servers = self.get_servers();
-        for id in servers {
-            if let Some(server) = self.get_server(id) {
-                server.write().unwrap().terminate();
-            }
-        }
+    pub fn running(&self) -> &AtomicBool {
+        &self.running
     }
 }

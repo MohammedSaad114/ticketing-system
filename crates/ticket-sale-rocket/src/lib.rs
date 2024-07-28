@@ -40,16 +40,12 @@ pub fn launch(config: &Config) -> Balancer {
 
     let database = Arc::new(RwLock::new(Database::new(config.tickets)));
     let coordinator = Arc::new(Coordinator::new(config.timeout, database.clone()));
-    let estimator = Estimator::new(
-        coordinator.clone(),
-        database.clone(),
-        config.estimator_roundtrip_time,
-    );
+    let estimator = Estimator::new(database.clone(), config.estimator_roundtrip_time);
 
-    let estimator_handle = estimator.start();
+    let estimator_handle = estimator.start(coordinator.clone());
 
     for _ in 0..config.initial_servers {
-        coordinator.add_server(10);
+        coordinator.add_server(config);
     }
 
     Balancer::new(coordinator.clone(), estimator_handle)

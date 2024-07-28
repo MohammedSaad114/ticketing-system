@@ -1,16 +1,12 @@
-//! Implementation of the estimator
-//! estimator.rs
-
 use std::sync::{atomic::Ordering, Arc, RwLock};
 use std::time::Duration;
 
 use super::coordinator::Coordinator;
 use super::database::Database;
+use crate::server::Server;
 
 /// Estimator that estimates the number of tickets available overall
-
 pub struct Estimator {
-    coordinator: Arc<Coordinator>,
     database: Arc<RwLock<Database>>,
     roundtrip_secs: u32,
 }
@@ -21,20 +17,14 @@ impl Estimator {
     /// `roundtrip_secs` is the time in seconds the estimator needs to contact all
     /// servers. If there are `N` servers, then the estimator should wait
     /// `roundtrip_secs / N` between each server when collecting statistics.
-    pub fn new(
-        coordinator: Arc<Coordinator>,
-        database: Arc<RwLock<Database>>,
-        roundtrip_secs: u32,
-    ) -> Self {
+    pub fn new(database: Arc<RwLock<Database>>, roundtrip_secs: u32) -> Self {
         Self {
-            coordinator,
             database,
             roundtrip_secs,
         }
     }
 
-    pub fn start(&self) -> std::thread::JoinHandle<()> {
-        let coordinator = self.coordinator.clone();
+    pub fn start(self: Arc<Self>, coordinator: Arc<Coordinator>) -> std::thread::JoinHandle<()> {
         let database = self.database.clone();
         let roundtrip_secs = self.roundtrip_secs;
         let running = coordinator.running();
@@ -54,13 +44,22 @@ impl Estimator {
                     db.get_num_available()
                 };
 
-                for server_id in servers {
-                    if let Some(server) = coordinator.get_server(server_id) {
-                        server.write().unwrap().update_estimate(db_available);
-                    }
+                let mut total_allocated_tickets = 0;
 
-                    std::thread::sleep(Duration::from_secs((roundtrip_secs / num_servers) as u64));
+                for server_id in servers {
+                    if let Some(server) = coordinator.get_server_by_id(server_id) {
+                        let server = server.read().unwrap();
+                        let server_tickets = server.get_allocated_tickets(); // Fixed method call
+                        total_allocated_tickets += server_tickets.len() as u32;
+                    }
                 }
+
+                // Example of how you might use the ticket data for estimation
+                let estimated_tickets = db_available + total_allocated_tickets;
+
+                println!("Estimated total tickets: {}", estimated_tickets);
+
+                std::thread::sleep(Duration::from_secs((roundtrip_secs / num_servers) as u64));
             }
         })
     }

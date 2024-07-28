@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc, RwLock,
 };
 
 use ticket_sale_core::Request;
@@ -21,57 +21,57 @@ pub struct Coordinator {
     /// Reference to the [`Database`]
     ///
     /// To be handed over to new servers.
-    database: Arc<Mutex<Database>>,
+    database: Arc<RwLock<Database>>,
 
     /// Map of active servers
-    servers: Arc<Mutex<HashMap<Uuid, Arc<Mutex<Server>>>>>,
+    servers: Arc<RwLock<HashMap<Uuid, Arc<RwLock<Server>>>>>,
     running: Arc<AtomicBool>,
 }
 
 impl Coordinator {
     /// Create the [`Coordinator`]
-    pub fn new(reservation_timeout: u32, database: Arc<Mutex<Database>>) -> Self {
+    pub fn new(reservation_timeout: u32, database: Arc<RwLock<Database>>) -> Self {
         Self {
             reservation_timeout,
             database,
-            servers: Arc::new(Mutex::new(HashMap::new())),
+            servers: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(AtomicBool::new(true)),
         }
     }
 
     pub fn add_server(&self, initial_allocation: u32) -> Uuid {
-        let server = Arc::new(Mutex::new(Server::new(
+        let server = Arc::new(RwLock::new(Server::new(
             self.database.clone(),
             initial_allocation,
             self.reservation_timeout,
         )));
-        let id = server.lock().unwrap().get_id();
-        self.servers.lock().unwrap().insert(id, server);
+        let id = server.read().unwrap().get_id();
+        self.servers.write().unwrap().insert(id, server);
         id
     }
 
     pub fn remove_server(&self, id: Uuid) {
         let server = {
-            let mut servers = self.servers.lock().unwrap();
+            let mut servers = self.servers.write().unwrap();
             servers.remove(&id)
         };
         if let Some(server) = server {
-            server.lock().unwrap().terminate();
+            server.write().unwrap().terminate();
         }
     }
 
     pub fn get_servers(&self) -> Vec<Uuid> {
-        self.servers.lock().unwrap().keys().cloned().collect()
+        self.servers.read().unwrap().keys().cloned().collect()
     }
 
-    pub fn get_server(&self, id: Uuid) -> Option<Arc<Mutex<Server>>> {
-        self.servers.lock().unwrap().get(&id).cloned()
+    pub fn get_server(&self, id: Uuid) -> Option<Arc<RwLock<Server>>> {
+        self.servers.read().unwrap().get(&id).cloned()
     }
 
     pub fn handle_request(&self, rq: Request) {
         if let Some(server_id) = rq.server_id() {
             if let Some(server) = self.get_server(server_id) {
-                server.lock().unwrap().process_request(rq);
+                server.write().unwrap().process_request(rq);
             } else {
                 rq.respond_with_err("Server not found");
             }
@@ -89,7 +89,7 @@ impl Coordinator {
     }
 
     pub fn adjust_server_count(&self, target_count: u32) -> u32 {
-        let servers = self.servers.lock().unwrap();
+        let servers = self.servers.write().unwrap();
         let current_count = servers.len() as u32;
 
         match target_count.cmp(&current_count) {
@@ -117,7 +117,7 @@ impl Coordinator {
         let servers = self.get_servers();
         for id in servers {
             if let Some(server) = self.get_server(id) {
-                server.lock().unwrap().terminate();
+                server.write().unwrap().terminate();
             }
         }
     }

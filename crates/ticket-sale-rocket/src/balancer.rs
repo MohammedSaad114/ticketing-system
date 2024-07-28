@@ -1,7 +1,7 @@
 //! Implementation of the load balancer
 //! balancer.rs
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use ticket_sale_core::{Request, RequestHandler, RequestKind};
 use uuid::Uuid;
@@ -15,8 +15,8 @@ use super::coordinator::Coordinator;
 /// `ticket_sale_rocket::Balancer`).
 pub struct Balancer {
     coordinator: Arc<Coordinator>,
-    customer_to_server: Arc<Mutex<HashMap<Uuid, Uuid>>>,
-    estimator_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    customer_to_server: Arc<RwLock<HashMap<Uuid, Uuid>>>,
+    estimator_handle: Arc<RwLock<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl Balancer {
@@ -26,14 +26,14 @@ impl Balancer {
     ) -> Self {
         Self {
             coordinator,
-            customer_to_server: Arc::new(Mutex::new(HashMap::new())),
-            estimator_handle: Arc::new(Mutex::new(Some(estimator_handle))),
+            customer_to_server: Arc::new(RwLock::new(HashMap::new())),
+            estimator_handle: Arc::new(RwLock::new(Some(estimator_handle))),
         }
     }
 
     fn get_server_for_customer(&self, customer: Uuid) -> Option<Uuid> {
         self.customer_to_server
-            .lock()
+            .read()
             .unwrap()
             .get(&customer)
             .cloned()
@@ -50,7 +50,7 @@ impl Balancer {
             }
         };
         self.customer_to_server
-            .lock()
+            .write()
             .unwrap()
             .insert(customer, server_id);
         server_id
@@ -93,7 +93,7 @@ impl RequestHandler for Balancer {
     fn shutdown(self) {
         self.coordinator.shutdown();
 
-        if let Some(handle) = self.estimator_handle.lock().unwrap().take() {
+        if let Some(handle) = self.estimator_handle.write().unwrap().take() {
             handle.join().expect("Estimator thread panicked");
         }
     }

@@ -2,7 +2,7 @@
 //! server.rs
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use ticket_sale_core::{Request, RequestKind};
@@ -16,7 +16,7 @@ pub struct Server {
     id: Uuid,
 
     /// The database
-    database: Arc<Mutex<Database>>,
+    database: Arc<RwLock<Database>>,
 
     allocated_tickets: Vec<u32>,
     reservations: HashMap<Uuid, (u32, SystemTime)>,
@@ -27,12 +27,12 @@ pub struct Server {
 
 impl Server {
     pub fn new(
-        database: Arc<Mutex<Database>>,
+        database: Arc<RwLock<Database>>,
         initial_allocation: u32,
         reservation_timeout: u32,
     ) -> Server {
         let id = Uuid::new_v4();
-        let allocated_tickets = database.lock().unwrap().allocate(initial_allocation);
+        let allocated_tickets = database.write().unwrap().allocate(initial_allocation);
         Self {
             id,
             database,
@@ -55,7 +55,7 @@ impl Server {
     pub fn terminate(&mut self) {
         self.terminating = true;
         self.database
-            .lock()
+            .write()
             .unwrap()
             .deallocate(&self.allocated_tickets);
         self.allocated_tickets.clear();
@@ -66,54 +66,58 @@ impl Server {
     }
 
     pub fn process_request(&mut self, rq: Request) {
-        self.handle_request(rq);
+        self.clean_expired_reservations();
+        if self.terminating {
+            self.handle_terminating_request(rq);
+        } else {
+            self.handle_active_request(rq);
+        }
     }
 
     pub fn update_estimate(&mut self, db_available: u32) {
         self.estimated_tickets = db_available + self.allocated_tickets.len() as u32;
     }
 
-    fn handle_request(&mut self, rq: Request) {
-        self.clean_expired_reservations();
+    fn handle_terminating_request(&mut self, rq: Request) {
+        match rq.kind() {
+            RequestKind::BuyTicket | RequestKind::AbortPurchase => {
+                self.handle_reservation_request(rq);
+            }
+            _ => {
+                rq.respond_with_err("Server is terminating");
+            }
+        }
+    }
 
-        if self.terminating {
-            match rq.kind() {
-                RequestKind::BuyTicket | RequestKind::AbortPurchase => {
-                    self.handle_reservation_request(rq);
-                }
-                _ => {
-                    rq.respond_with_err("Server is terminating");
+    fn handle_active_request(&mut self, rq: Request) {
+        match rq.kind() {
+            RequestKind::NumAvailableTickets => {
+                let available_tickets = self.allocated_tickets.len() as u32;
+                rq.respond_with_int(available_tickets + self.estimated_tickets);
+            }
+            RequestKind::ReserveTicket => {
+                if let Some(ticket) = self.allocated_tickets.pop() {
+                    let now = SystemTime::now();
+                    self.reservations.insert(rq.customer_id(), (ticket, now));
+                    rq.respond_with_int(ticket);
+                } else {
+                    let mut allocated_tickets = {
+                        let mut db = self.database.write().unwrap();
+                        db.allocate(10)
+                    };
+                    self.allocated_tickets.append(&mut allocated_tickets);
+                    self.process_request(rq); // Retry the request after allocating more
+                                              // tickets
                 }
             }
-        } else {
-            match rq.kind() {
-                RequestKind::NumAvailableTickets => {
-                    let available_tickets = self.allocated_tickets.len() as u32;
-                    rq.respond_with_int(available_tickets + self.estimated_tickets);
-                }
-                RequestKind::ReserveTicket => {
-                    if let Some(ticket) = self.allocated_tickets.pop() {
-                        let now = SystemTime::now();
-                        self.reservations.insert(rq.customer_id(), (ticket, now));
-                        rq.respond_with_int(ticket);
-                    } else {
-                        let mut allocated_tickets = {
-                            let mut db = self.database.lock().unwrap();
-                            db.allocate(10)
-                        };
-                        self.allocated_tickets.append(&mut allocated_tickets);
-                        self.handle_request(rq);
-                    }
-                }
-                RequestKind::BuyTicket | RequestKind::AbortPurchase => {
-                    self.handle_reservation_request(rq);
-                }
-                RequestKind::Debug => {
-                    rq.respond_with_string("Debugging request handled");
-                }
-                _ => {
-                    rq.respond_with_err("Invalid request for server");
-                }
+            RequestKind::BuyTicket | RequestKind::AbortPurchase => {
+                self.handle_reservation_request(rq);
+            }
+            RequestKind::Debug => {
+                rq.respond_with_string("Debugging request handled");
+            }
+            _ => {
+                rq.respond_with_err("Invalid request for server");
             }
         }
     }
@@ -130,7 +134,7 @@ impl Server {
                     rq.respond_with_int(ticket);
                 }
             } else if rq.kind() == &RequestKind::AbortPurchase {
-                self.database.lock().unwrap().deallocate(&[ticket]);
+                self.database.write().unwrap().deallocate(&[ticket]);
                 rq.respond_with_int(ticket);
             }
         } else {

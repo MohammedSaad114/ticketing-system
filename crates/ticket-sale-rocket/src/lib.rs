@@ -11,7 +11,7 @@
 
 #![allow(rustdoc::private_intra_doc_links)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use estimator::Estimator;
 use ticket_sale_core::Config;
@@ -37,7 +37,7 @@ pub fn launch(config: &Config) -> Balancer {
         todo!("Bonus not implemented!")
     }
 
-    let database = Arc::new(Mutex::new(Database::new(config.tickets)));
+    let database = Arc::new(RwLock::new(Database::new(config.tickets)));
     let coordinator = Arc::new(Coordinator::new(config.timeout, database.clone()));
     let estimator = Estimator::new(
         coordinator.clone(),

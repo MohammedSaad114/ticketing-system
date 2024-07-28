@@ -1,7 +1,7 @@
 //! Implementation of the estimator
 //! estimator.rs
 
-use std::sync::{atomic::Ordering, Arc, Mutex};
+use std::sync::{atomic::Ordering, Arc, RwLock};
 use std::time::Duration;
 
 use super::coordinator::Coordinator;
@@ -11,7 +11,7 @@ use super::database::Database;
 
 pub struct Estimator {
     coordinator: Arc<Coordinator>,
-    database: Arc<Mutex<Database>>,
+    database: Arc<RwLock<Database>>,
     roundtrip_secs: u32,
 }
 
@@ -23,7 +23,7 @@ impl Estimator {
     /// `roundtrip_secs / N` between each server when collecting statistics.
     pub fn new(
         coordinator: Arc<Coordinator>,
-        database: Arc<Mutex<Database>>,
+        database: Arc<RwLock<Database>>,
         roundtrip_secs: u32,
     ) -> Self {
         Self {
@@ -50,13 +50,13 @@ impl Estimator {
                 }
 
                 let db_available = {
-                    let db = database.lock().unwrap();
+                    let db = database.read().unwrap();
                     db.get_num_available()
                 };
 
                 for server_id in servers {
                     if let Some(server) = coordinator.get_server(server_id) {
-                        server.lock().unwrap().update_estimate(db_available);
+                        server.write().unwrap().update_estimate(db_available);
                     }
 
                     std::thread::sleep(Duration::from_secs((roundtrip_secs / num_servers) as u64));

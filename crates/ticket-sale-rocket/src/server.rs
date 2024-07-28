@@ -2,7 +2,7 @@
 //! server.rs
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::SystemTime;
 
 use ticket_sale_core::{Request, RequestKind};

@@ -33,7 +33,7 @@ impl Server {
     /// Create a new [`Server`]
     pub fn new(database: Arc<RwLock<Database>>, config: &Config) -> Server {
         let id = Uuid::new_v4();
-        let initial_allocation = 20; // Arbitrary initial allocation, can be adjusted as needed
+        let initial_allocation = 10; // Arbitrary initial allocation, can be adjusted as needed
         let reservation_timeout = config.timeout;
         let allocated_tickets = {
             let mut db = database.write().unwrap();

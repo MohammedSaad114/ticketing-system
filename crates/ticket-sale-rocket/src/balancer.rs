@@ -1,12 +1,8 @@
-//! Implementation of the load balancer
-//! balancer.rs
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use ticket_sale_core::{Config, Request, RequestHandler, RequestKind};
+use ticket_sale_core::{Request, RequestHandler, RequestKind};
 use uuid::Uuid;
-
-use super::coordinator::Coordinator;
 
 /// Implementation of the load balancer
 ///
@@ -14,49 +10,36 @@ use super::coordinator::Coordinator;
 /// exposed from the crate root (to be used from the tester as
 /// `ticket_sale_rocket::Balancer`).
 pub struct Balancer {
-    coordinator: Arc<Coordinator>,
-    customer_to_server: Arc<RwLock<HashMap<Uuid, Uuid>>>,
-    estimator_handle: Arc<RwLock<Option<std::thread::JoinHandle<()>>>>,
-    config: Config,
+    /// Mapping of customers to their assigned server IDs
+    customer_server_map: Arc<RwLock<HashMap<Uuid, Uuid>>>,
+
+    /// List of available server IDs
+    servers: Arc<RwLock<Vec<Uuid>>>,
 }
 
 impl Balancer {
-    pub fn new(
-        coordinator: Arc<Coordinator>,
-        estimator_handle: std::thread::JoinHandle<()>,
-        config: Config,
-    ) -> Self {
+    /// Create a new [`Balancer`]
+    pub fn new() -> Self {
         Self {
-            coordinator,
-            customer_to_server: Arc::new(RwLock::new(HashMap::new())),
-            estimator_handle: Arc::new(RwLock::new(Some(estimator_handle))),
-            config,
+            customer_server_map: Arc::new(RwLock::new(HashMap::new())),
+            servers: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
-    fn get_server_for_customer(&self, customer: Uuid) -> Option<Uuid> {
-        self.customer_to_server
-            .read()
-            .unwrap()
-            .get(&customer)
-            .cloned()
-    }
-
-    fn assign_server_to_customer(&self, customer: Uuid) -> Uuid {
-        let server_id = {
-            let servers = self.coordinator.get_servers();
-            if !servers.is_empty() {
-                let index = rand::random::<usize>() % servers.len();
-                servers[index]
-            } else {
-                return Default::default();
-            }
-        };
-        self.customer_to_server
-            .write()
-            .unwrap()
-            .insert(customer, server_id);
-        server_id
+    /// Helper function to assign a server to a customer
+    fn assign_server_to_customer(&self, customer_id: Uuid) -> Option<Uuid> {
+        let servers = self.servers.read().unwrap();
+        if servers.is_empty() {
+            None
+        } else {
+            // Simple round-robin assignment
+            let server_id = servers[customer_id.as_u128() as usize % servers.len()];
+            self.customer_server_map
+                .write()
+                .unwrap()
+                .insert(customer_id, server_id);
+            Some(server_id)
+        }
     }
 }
 
@@ -67,38 +50,51 @@ impl RequestHandler for Balancer {
     fn handle(&self, mut rq: Request) {
         match rq.kind() {
             RequestKind::GetNumServers => {
-                let num_servers = self.coordinator.get_servers().len() as u32;
+                let num_servers = self.servers.read().unwrap().len() as u32;
                 rq.respond_with_int(num_servers);
             }
             RequestKind::SetNumServers => {
-                if let Some(num) = rq.read_u32() {
-                    let mut coordinator = Arc::clone(&self.coordinator);
-                    let adjusted_count = Arc::get_mut(&mut coordinator)
-                        .unwrap()
-                        .adjust_server_count(num, &self.config);
-                    rq.respond_with_int(adjusted_count);
-                } else {
-                    rq.respond_with_err("No number of servers provided");
-                }
+                let num_servers = rq.read_u32().unwrap_or(0) as usize;
+                let mut servers = self.servers.write().unwrap();
+                servers.clear();
+                servers.extend((0..num_servers).map(|_| Uuid::new_v4()));
+                rq.respond_with_int(num_servers as u32);
             }
             RequestKind::GetServers => {
-                let servers = self.coordinator.get_servers();
+                let servers = self.servers.read().unwrap();
                 rq.respond_with_server_list(&servers);
+            }
+            RequestKind::Debug => {
+                // 📌 Hint: You can use `rq.url()` and `rq.method()` to
+                // implement multiple debugging commands.
+                rq.respond_with_string("Happy Debugging! 🚫🐛");
             }
             _ => {
                 let customer_id = rq.customer_id();
-                let server_id = self
-                    .get_server_for_customer(customer_id)
-                    .unwrap_or_else(|| self.assign_server_to_customer(customer_id));
+                let server_id = {
+                    let customer_server_map = self.customer_server_map.write().unwrap();
+                    if let Some(&server_id) = customer_server_map.get(&customer_id) {
+                        server_id
+                    } else {
+                        match self.assign_server_to_customer(customer_id) {
+                            Some(server_id) => server_id,
+                            None => {
+                                rq.respond_with_err("No available servers");
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                // Simulate request forwarding to the assigned server
                 rq.set_server_id(server_id);
-                self.coordinator.handle_request(rq);
+                rq.respond_with_string(format!("Forwarded to server {}", server_id));
             }
         }
     }
 
     fn shutdown(self) {
-        if let Some(handle) = self.estimator_handle.write().unwrap().take() {
-            handle.join().expect("Estimator thread panicked");
-        }
+        // Implement any necessary shutdown logic here
+        println!("Balancer is shutting down");
     }
 }

@@ -125,6 +125,12 @@ impl Coordinator {
         }
     }
 
+    /// Start the coordinator
+    pub fn start(&self) {
+        self.running
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn running(&self) -> &AtomicBool {
         &self.running
     }

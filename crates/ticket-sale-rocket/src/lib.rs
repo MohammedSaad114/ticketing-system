@@ -33,6 +33,7 @@ use database::Database;
 /// surrounding infrastructure.
 ///
 /// ⚠️ This functions must not be renamed and its signature must not be changed.
+/// added the tests
 pub fn launch(config: &Config) -> Balancer {
     if config.bonus {
         todo!("Bonus not implemented!")

@@ -5,9 +5,10 @@ use std::mem::ManuallyDrop;
 use std::sync::OnceLock;
 
 use eyre::Result;
-use jni::objects::JObject;
 use jni::{
-    objects::{GlobalRef, JClass, JMethodID, JPrimitiveArray, JString, JValue, ReleaseMode},
+    objects::{
+        GlobalRef, JClass, JObject, JPrimitiveArray, JStaticMethodID, JString, JValue, ReleaseMode,
+    },
     signature::{Primitive, ReturnType},
     sys::{jboolean, jbyte, jint, jlong},
     InitArgsBuilder, JNIEnv, JavaVM, NativeMethod,
@@ -50,8 +51,7 @@ struct BalancerThreadContext {
     receiver: flume::Receiver<RequestMsg>,
     print_sender: PrintSender,
     mock_request_cls: GlobalRef,
-    mock_request_init: JMethodID,
-    request_handler_handle: JMethodID,
+    make_request: JStaticMethodID,
 }
 
 pub struct JniBalancer {
@@ -74,12 +74,24 @@ fn init_jvm(class_path: &str, enable_assertions: bool) -> JavaVM {
 }
 
 fn channel_to_jni(channel: oneshot::Sender<Response>) -> jlong {
-    sptr::Strict::expose_addr(Box::into_raw(Box::new(channel))) as u64 as _
+    sptr::Strict::expose_addr(Box::into_raw(Box::new(Some(channel)))) as u64 as _
 }
 /// SAFETY: `ptr` must have been created from `channel_to_jni()`
 unsafe fn channel_from_jni(ptr: jlong) -> oneshot::Sender<Response> {
     let ptr = sptr::from_exposed_addr_mut(ptr as u64 as _);
-    *unsafe { Box::from_raw(ptr) }
+    Option::take(unsafe { &mut *ptr }).unwrap()
+}
+
+#[no_mangle]
+unsafe extern "system" fn Java_com_pseuco_cp24_request_MockRequest_dropResponseBox<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    response_ptr: jlong,
+) {
+    let ptr: *mut Option<oneshot::Sender<Response>> =
+        sptr::from_exposed_addr_mut(response_ptr as u64 as _);
+    // SAFETY: The caller ensures that the pointer is valid and the box is not dropped twice.
+    drop(unsafe { Box::from_raw(ptr) });
 }
 
 pub async fn start(
@@ -126,6 +138,11 @@ pub async fn start(
                     fn_ptr: Java_com_pseuco_cp24_request_MockRequest_respondWithServerIds
                         as *mut c_void,
                 },
+                NativeMethod {
+                    name: "dropResponseBox".into(),
+                    sig: "(J)V".into(),
+                    fn_ptr: Java_com_pseuco_cp24_request_MockRequest_dropResponseBox as *mut c_void,
+                },
             ],
         )?;
 
@@ -166,14 +183,11 @@ pub async fn start(
         ],
     )?;
 
-    // spell-checker:disable-next-line
-    let mock_request_init = env.get_method_id(&mock_request_cls, "<init>", "(JIJJZJJI)V")?;
-
-    let request_handler_handle = env.get_method_id(
-        "com/pseuco/cp24/request/RequestHandler",
-        "handle",
+    let make_request = env.get_static_method_id(
+        &mock_request_cls,
+        "makeRequest",
         // spell-checker:disable-next-line
-        "(Lcom/pseuco/cp24/request/Request;)V",
+        "(Lcom/pseuco/cp24/request/RequestHandler;JIJJZJJI)V",
     )?;
 
     let mock_request_cls = env.new_global_ref(mock_request_cls)?;
@@ -186,8 +200,7 @@ pub async fn start(
             receiver,
             print_sender: print_sender.clone(),
             mock_request_cls: mock_request_cls.clone(),
-            mock_request_init,
-            request_handler_handle,
+            make_request,
         }));
         let addr = sptr::Strict::expose_addr(balancer_context) as u64 as jlong;
         (sender, addr)
@@ -371,8 +384,7 @@ unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_balancerMa
         receiver,
         print_sender,
         mock_request_cls,
-        mock_request_init,
-        request_handler_handle,
+        make_request,
     } = *unsafe { Box::from_raw(sptr::from_exposed_addr_mut(context as u64 as usize)) };
 
     for msg in receiver.into_iter() {
@@ -386,6 +398,7 @@ unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_balancerMa
             None => -1,
         };
 
+        // RequestHandler balancer
         // long responsePtr
         // int kind
         // long customerL
@@ -396,10 +409,12 @@ unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_balancerMa
         // int payload
         // SAFETY: the JMethodID is valid and the argument / return types match
         let result = unsafe {
-            env.new_object_unchecked(
+            env.call_static_method_unchecked(
                 &mock_request_cls,
-                mock_request_init,
+                make_request,
+                ReturnType::Primitive(Primitive::Void),
                 &[
+                    JValue::Object(&request_handler).as_jni(),
                     JValue::Long(channel_to_jni(msg.response_channel)).as_jni(),
                     JValue::Int(msg.kind as jint).as_jni(),
                     JValue::Long(cid_m as jlong).as_jni(),
@@ -409,23 +424,6 @@ unsafe extern "system" fn Java_com_pseuco_cp24_request_RocketLauncher_balancerMa
                     JValue::Long(sid_m as jlong).as_jni(),
                     JValue::Int(payload).as_jni(),
                 ],
-            )
-        };
-        let rq_obj = match result {
-            Ok(obj) => obj,
-            Err(err) => {
-                print_sender.send((err.to_string(), PrintKind::Panic)).ok();
-                return;
-            }
-        };
-
-        // SAFETY: the JMethodID is valid and the argument / return types match
-        let result = unsafe {
-            env.call_method_unchecked(
-                &request_handler,
-                request_handler_handle,
-                ReturnType::Primitive(Primitive::Void),
-                &[JValue::Object(&rq_obj).as_jni()],
             )
         };
         if let Err(err) = result {

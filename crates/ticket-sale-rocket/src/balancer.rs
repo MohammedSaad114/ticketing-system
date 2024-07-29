@@ -1,8 +1,13 @@
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, RwLock,
+};
 
 use ticket_sale_core::{Request, RequestHandler, RequestKind};
 use uuid::Uuid;
+
+use crate::coordinator::Coordinator; // Import Coordinator
 
 /// Implementation of the load balancer
 ///
@@ -15,14 +20,22 @@ pub struct Balancer {
 
     /// List of available server IDs
     servers: Arc<RwLock<Vec<Uuid>>>,
+
+    /// Flag to indicate if the balancer is shutting down
+    shutting_down: AtomicBool,
+
+    /// Reference to the Coordinator
+    coordinator: Option<Arc<Coordinator>>,
 }
 
 impl Balancer {
     /// Create a new [`Balancer`]
-    pub fn new() -> Self {
+    pub fn new(coordinator: Option<Arc<Coordinator>>) -> Self {
         Self {
             customer_server_map: Arc::new(RwLock::new(HashMap::new())),
             servers: Arc::new(RwLock::new(Vec::new())),
+            shutting_down: AtomicBool::new(false),
+            coordinator,
         }
     }
 
@@ -44,10 +57,12 @@ impl Balancer {
 }
 
 impl RequestHandler for Balancer {
-    // 📌 Hint: Look into the `RequestHandler` trait definition for specification
-    // docstrings of `handle()` and `shutdown()`.
-
     fn handle(&self, mut rq: Request) {
+        if self.shutting_down.load(Ordering::SeqCst) {
+            rq.respond_with_err("Balancer is shutting down.");
+            return;
+        }
+
         match rq.kind() {
             RequestKind::GetNumServers => {
                 let num_servers = self.servers.read().unwrap().len() as u32;
@@ -65,14 +80,12 @@ impl RequestHandler for Balancer {
                 rq.respond_with_server_list(&servers);
             }
             RequestKind::Debug => {
-                // 📌 Hint: You can use `rq.url()` and `rq.method()` to
-                // implement multiple debugging commands.
                 rq.respond_with_string("Happy Debugging! 🚫🐛");
             }
             _ => {
                 let customer_id = rq.customer_id();
                 let server_id = {
-                    let customer_server_map = self.customer_server_map.write().unwrap();
+                    let customer_server_map = self.customer_server_map.read().unwrap();
                     if let Some(&server_id) = customer_server_map.get(&customer_id) {
                         server_id
                     } else {
@@ -94,7 +107,12 @@ impl RequestHandler for Balancer {
     }
 
     fn shutdown(self) {
-        // Implement any necessary shutdown logic here
+        self.shutting_down.store(true, Ordering::SeqCst);
         println!("Balancer is shutting down");
+
+        // Ensure coordinator is shut down
+        if let Some(coordinator) = self.coordinator {
+            coordinator.stop(); // Stop the coordinator
+        }
     }
 }

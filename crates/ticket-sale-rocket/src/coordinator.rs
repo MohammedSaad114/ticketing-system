@@ -125,6 +125,9 @@ impl Coordinator {
         }
     }
 
+    /// settin the estimator
+    /// 
+
     pub fn set_estimator(&mut self, estimator: Arc<Estimator>) {
         self.estimator = Some(estimator);
     }

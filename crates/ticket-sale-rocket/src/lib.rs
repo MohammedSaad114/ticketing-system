@@ -39,16 +39,18 @@ pub fn launch(config: &Config) -> Balancer {
         todo!("Bonus not implemented!")
     }
 
-    let database = Arc::new(RwLock::new(Database::new(config.tickets)));
-    let balancer = Balancer::new();
+    let database = Arc::new(RwLock::new(Database::new(
+        config.tickets.try_into().unwrap(),
+    )));
     let coordinator = Arc::new(Coordinator::new(config.timeout, database.clone(), config));
+
+    let balancer = Balancer::new(Some(coordinator.clone()));
     let estimator = Arc::new(Estimator::new(
         coordinator.clone(),
         database.clone(),
         config.estimator_roundtrip_time,
     ));
 
-    coordinator.start();
     estimator.start();
 
     balancer

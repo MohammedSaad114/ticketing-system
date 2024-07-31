@@ -1,24 +1,17 @@
-use std::sync::atomic::Ordering;
-// estimator.rs
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use super::coordinator::Coordinator;
-use super::database::Database;
+use crate::{Coordinator, Database};
 
-/// Estimator that estimates the number of tickets available overall
 pub struct Estimator {
     coordinator: Arc<Coordinator>,
     database: Arc<RwLock<Database>>,
     roundtrip_secs: u32,
+    running: Arc<AtomicBool>,
 }
 
 impl Estimator {
-    /// The estimator's main routine.
-    ///
-    /// `roundtrip_secs` is the time in seconds the estimator needs to contact all
-    /// servers. If there are `N` servers, then the estimator should wait
-    /// `roundtrip_secs / N` between each server when collecting statistics.
     pub fn new(
         coordinator: Arc<Coordinator>,
         database: Arc<RwLock<Database>>,
@@ -28,6 +21,7 @@ impl Estimator {
             coordinator,
             database,
             roundtrip_secs,
+            running: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -35,12 +29,9 @@ impl Estimator {
         let coordinator = self.coordinator.clone();
         let database = self.database.clone();
         let roundtrip_secs = self.roundtrip_secs;
-        coordinator.running();
+        let running = self.running.clone();
 
         std::thread::spawn(move || {
-            let coordinator = coordinator.clone(); // Move coordinator into the closure
-            let running = coordinator.running(); // Move running inside the closure
-
             while running.load(Ordering::SeqCst) {
                 let servers = coordinator.get_servers();
                 let num_servers = servers.len() as u32;
@@ -57,12 +48,20 @@ impl Estimator {
 
                 for server_id in servers {
                     if let Some(server) = coordinator.get_server(server_id) {
-                        server.write().unwrap().update_estimate(db_available);
+                        server
+                            .write()
+                            .unwrap()
+                            .update_estimate(db_available.try_into().unwrap());
                     }
 
                     std::thread::sleep(Duration::from_secs((roundtrip_secs / num_servers) as u64));
                 }
             }
         })
+    }
+
+    pub fn shutdown(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        println!("Estimator is shutting down");
     }
 }

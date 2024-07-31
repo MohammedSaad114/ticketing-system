@@ -1,136 +1,186 @@
-// server.rs
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, RwLock,
+};
+use std::time::{Duration, Instant};
 
-use ticket_sale_core::{Config, Request, RequestKind};
+use ticket_sale_core::{Request, RequestKind};
 use uuid::Uuid;
 
 use super::database::Database;
 
-/// A server in the ticket sales system
+/// Represents a single ticket
+#[derive(Clone, Copy, Debug)]
+pub enum TicketState {
+    Available,
+    Reserved,
+    Sold,
+}
+
+/// Represents a server that handles ticket sales
 pub struct Server {
-    /// The server's ID
-    pub id: Uuid,
-
-    /// The database
+    id: Uuid,
     database: Arc<RwLock<Database>>,
-
-    /// Allocated tickets held by the server
-    allocated_tickets: Vec<u32>,
-
-    /// Reservations mapping customer ID to ticket and reservation time
-    reservations: HashMap<Uuid, (u32, SystemTime)>,
-
-    /// Reservation timeout in seconds
-    reservation_timeout: u32,
-
-    /// Estimated tickets available elsewhere
-    estimated_tickets: u32,
+    tickets: Mutex<VecDeque<Uuid>>,
+    reservations: Mutex<HashMap<Uuid, (Uuid, Instant)>>,
+    reservation_timeout: Duration,
+    last_estimate: Mutex<u32>, // Field to store the last estimate received from the estimator
+    running: AtomicBool,       // Added field to control the running state
 }
 
 impl Server {
-    /// Create a new [`Server`]
-    pub fn new(database: Arc<RwLock<Database>>, config: &Config) -> Server {
+    pub fn new(
+        database: Arc<RwLock<Database>>,
+        ticket_count: u32,
+        reservation_timeout: u32,
+    ) -> Self {
         let id = Uuid::new_v4();
-        let initial_allocation = 10; // Arbitrary initial allocation, can be adjusted as needed
-        let reservation_timeout = config.timeout;
-        let allocated_tickets = {
-            let mut db = database.write().unwrap();
-            db.allocate(initial_allocation)
+        let tickets = {
+            let db = database.write().unwrap();
+            let allocated_tickets = db.allocate_tickets(ticket_count as usize);
+            Mutex::new(VecDeque::from(allocated_tickets))
         };
+
         Self {
             id,
             database,
-            allocated_tickets,
-            reservations: HashMap::new(),
-            reservation_timeout,
-            estimated_tickets: 0,
+            tickets,
+            reservations: Mutex::new(HashMap::new()),
+            reservation_timeout: Duration::from_secs(reservation_timeout.into()),
+            last_estimate: Mutex::new(0), // Initialize the last estimate
+            running: AtomicBool::new(true), // Initialize running state
         }
     }
 
-    /// Handle a [`Request`]
-    pub fn handle_request(&mut self, rq: Request) {
-        self.clean_expired_reservations();
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn handle_request(&self, rq: Request) {
+        if !self.running.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is shutting down.");
+            return;
+        }
+
         match rq.kind() {
-            RequestKind::NumAvailableTickets => {
-                let available_tickets =
-                    self.allocated_tickets.len() as u32 + self.estimated_tickets;
-                rq.respond_with_int(available_tickets);
-            }
-            RequestKind::ReserveTicket => {
-                self.reserve_ticket(rq);
-            }
-            RequestKind::BuyTicket => {
-                if let Some((ticket, _)) = self.reservations.remove(&rq.customer_id()) {
-                    rq.respond_with_int(ticket);
-                } else {
-                    rq.respond_with_err("No reservation found.");
-                }
-            }
-            RequestKind::AbortPurchase => {
-                if let Some((ticket, _)) = self.reservations.remove(&rq.customer_id()) {
-                    self.allocated_tickets.push(ticket);
-                    rq.respond_with_int(ticket);
-                } else {
-                    rq.respond_with_err("No reservation found.");
-                }
-            }
+            RequestKind::ReserveTicket => self.handle_reserve_ticket(rq),
+            RequestKind::BuyTicket => self.handle_buy_ticket(rq),
+            RequestKind::AbortPurchase => self.handle_abort_purchase(rq),
+            RequestKind::NumAvailableTickets => self.handle_num_available_tickets(rq),
             _ => rq.respond_with_err("Unsupported request kind."),
         }
     }
 
-    /// Clean expired reservations
-    fn clean_expired_reservations(&mut self) {
-        let now = SystemTime::now();
-        let timeout = Duration::new(self.reservation_timeout.into(), 0);
-        let mut expired_tickets = Vec::new();
+    fn handle_reserve_ticket(&self, rq: Request) {
+        if !self.running.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is shutting down.");
+            return;
+        }
 
-        self.reservations.retain(|_, &mut (ticket, reserved_at)| {
-            if now
-                .duration_since(reserved_at)
-                .unwrap_or_else(|_| Duration::new(0, 0))
-                < timeout
-            {
-                true
-            } else {
-                expired_tickets.push(ticket);
-                false
-            }
+        let customer_id = rq.customer_id();
+        let now = Instant::now();
+
+        let mut reservations = self.reservations.lock().unwrap();
+        let tickets = self.tickets.lock().unwrap();
+
+        // Expire old reservations
+        reservations.retain(|_, &mut (_, timestamp)| {
+            now.duration_since(timestamp) < self.reservation_timeout
         });
 
-        self.allocated_tickets.extend(expired_tickets);
-    }
-
-    /// Reserve a ticket for a customer
-    fn reserve_ticket(&mut self, rq: Request) {
-        if self.allocated_tickets.is_empty() {
-            // Try to allocate more tickets
-            let new_tickets = {
-                let mut db = self.database.write().unwrap();
-                db.allocate(100) // Adjust as needed
-            };
-            if new_tickets.is_empty() {
-                rq.respond_with_sold_out();
-                return;
-            }
-            self.allocated_tickets.extend(new_tickets);
+        // Check if the customer already has a reservation
+        if let Some(&(ticket_id, _)) = reservations.get(&customer_id) {
+            rq.respond_with_int(ticket_id.as_u128() as u32);
+            return;
         }
-        if let Some(ticket) = self.allocated_tickets.pop() {
-            self.reservations
-                .insert(rq.customer_id(), (ticket, SystemTime::now()));
-            rq.respond_with_int(ticket);
+
+        // Find an available ticket
+        if let Some(&ticket_id) = tickets.front() {
+            reservations.insert(customer_id, (ticket_id, now));
+            rq.respond_with_int(ticket_id.as_u128() as u32);
         } else {
-            rq.respond_with_err("Failed to allocate tickets.");
+            rq.respond_with_sold_out();
         }
     }
 
-    pub fn get_allocated_tickets(&self) -> Vec<u32> {
-        self.allocated_tickets.clone()
+    fn handle_buy_ticket(&self, mut rq: Request) {
+        if !self.running.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is shutting down.");
+            return;
+        }
+
+        let customer_id = rq.customer_id();
+        let ticket_id = Uuid::from_u128(rq.read_u32().unwrap_or_default() as u128);
+
+        let mut reservations = self.reservations.lock().unwrap();
+
+        if let Some(&(reserved_ticket_id, _)) = reservations.get(&customer_id) {
+            if reserved_ticket_id == ticket_id {
+                let db = self.database.write().unwrap();
+                db.set_ticket_state(ticket_id, TicketState::Sold);
+                reservations.remove(&customer_id);
+                rq.respond_with_int(ticket_id.as_u128() as u32);
+            } else {
+                rq.respond_with_err("Ticket ID mismatch.");
+            }
+        } else {
+            rq.respond_with_err("No reservation found.");
+        }
     }
 
-    /// Update the estimated number of available tickets
-    pub fn update_estimate(&mut self, db_available: u32) {
-        self.estimated_tickets = db_available + self.allocated_tickets.len() as u32;
+    fn handle_abort_purchase(&self, mut rq: Request) {
+        if !self.running.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is shutting down.");
+            return;
+        }
+
+        let customer_id = rq.customer_id();
+        let ticket_id = Uuid::from_u128(rq.read_u32().unwrap_or_default() as u128);
+
+        let mut reservations = self.reservations.lock().unwrap();
+        let mut tickets = self.tickets.lock().unwrap();
+
+        if let Some(&(reserved_ticket_id, _)) = reservations.get(&customer_id) {
+            if reserved_ticket_id == ticket_id {
+                reservations.remove(&customer_id);
+                tickets.push_back(ticket_id);
+                rq.respond_with_int(ticket_id.as_u128() as u32);
+            } else {
+                rq.respond_with_err("Ticket ID mismatch.");
+            }
+        } else {
+            rq.respond_with_err("No reservation found.");
+        }
+    }
+
+    fn handle_num_available_tickets(&self, rq: Request) {
+        if !self.running.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is shutting down.");
+            return;
+        }
+
+        let tickets = self.tickets.lock().unwrap();
+        let estimate = self.last_estimate.lock().unwrap();
+        let available_tickets = tickets.len() as u32 + *estimate;
+        rq.respond_with_int(available_tickets);
+    }
+
+    /// Get the current number of allocated tickets.
+    pub fn get_allocated_ticket_count(&self) -> u32 {
+        let tickets = self.tickets.lock().unwrap();
+        tickets.len() as u32
+    }
+
+    /// Update the estimate with the new value.
+    pub fn update_estimate(&self, new_estimate: u32) {
+        let mut last_estimate = self.last_estimate.lock().unwrap();
+        *last_estimate = new_estimate;
+    }
+
+    /// Shut down the server, stopping it from processing new requests.
+    pub fn shutdown(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        println!("Server {} is shutting down", self.id);
     }
 }

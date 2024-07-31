@@ -1,45 +1,72 @@
-//! Implementation of the central database for tickets
-//! database.rs
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
-/// Implementation of the central database for tickets
+// use std::time::Instant;
+use uuid::Uuid;
+
+use crate::server::TicketState;
+
 #[derive(Clone)]
 pub struct Database {
-    /// List of available tickets that have not yet been allocated by any server
-    unallocated: Vec<u32>,
+    ticket_count: Arc<AtomicUsize>,
+    tickets: Arc<RwLock<HashMap<Uuid, TicketState>>>,
 }
 
 impl Database {
-    /// Create a new [`Database`].
-    pub fn new(num_tickets: u32) -> Self {
-        let unallocated: Vec<u32> = (0..num_tickets).collect();
-        Self { unallocated }
-    }
-
-    /// Get the number of available tickets.
-    pub fn get_num_available(&self) -> u32 {
-        self.unallocated.len() as u32
-    }
-
-    /// Allocate `num_tickets` many tickets.
-    ///
-    /// The tickets are removed from the database.
-    pub fn allocate(&mut self, num_tickets: u32) -> Vec<u32> {
-        let mut tickets = Vec::with_capacity(num_tickets as usize);
-
-        if num_tickets >= self.unallocated.len() as u32 {
-            return std::mem::take(&mut self.unallocated);
+    pub fn new(ticket_count: usize) -> Self {
+        let mut tickets = HashMap::new();
+        for _ in 0..ticket_count {
+            tickets.insert(Uuid::new_v4(), TicketState::Available);
         }
 
-        let split = self.unallocated.len() - num_tickets as usize;
-        tickets.extend_from_slice(&self.unallocated[split..]);
-        self.unallocated.truncate(split);
-        tickets
+        Self {
+            ticket_count: Arc::new(AtomicUsize::new(ticket_count)),
+            tickets: Arc::new(RwLock::new(tickets)),
+        }
     }
 
-    /// Deallocate `tickets`.
-    ///
-    /// The tickets are added to the database.
-    pub fn deallocate(&mut self, tickets: &[u32]) {
-        self.unallocated.extend_from_slice(tickets);
+    pub fn allocate_tickets(&self, count: usize) -> Vec<Uuid> {
+        let mut allocated_tickets = Vec::new();
+        let mut tickets = self.tickets.write().unwrap();
+
+        for (ticket_id, state) in tickets.iter_mut() {
+            if allocated_tickets.len() >= count {
+                break;
+            }
+
+            if matches!(state, TicketState::Available) {
+                *state = TicketState::Reserved;
+                allocated_tickets.push(*ticket_id);
+            }
+        }
+
+        allocated_tickets
+    }
+
+    pub fn get_ticket_state(&self, ticket_id: Uuid) -> Option<TicketState> {
+        self.tickets.read().unwrap().get(&ticket_id).cloned()
+    }
+
+    pub fn set_ticket_state(&self, ticket_id: Uuid, state: TicketState) {
+        self.tickets.write().unwrap().insert(ticket_id, state);
+    }
+
+    pub fn get_ticket_count(&self) -> usize {
+        self.ticket_count.load(Ordering::SeqCst)
+    }
+
+    pub fn adjust_ticket_count(&self, adjustment: isize) {
+        self.ticket_count
+            .fetch_add(adjustment as usize, Ordering::SeqCst);
+    }
+
+    /// Get the number of available tickets
+    pub fn get_num_available(&self) -> usize {
+        let tickets = self.tickets.read().unwrap();
+        tickets
+            .values()
+            .filter(|&&state| matches!(state, TicketState::Available))
+            .count()
     }
 }

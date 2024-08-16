@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{Coordinator, Database};
 
@@ -61,12 +61,15 @@ impl Estimator {
         let running = self.running.clone();
 
         std::thread::spawn(move || {
+            let roundtrip_duration = Duration::from_secs(roundtrip_secs as u64);
             while running.load(Ordering::SeqCst) {
+                let start_time = Instant::now();
+
                 // Determine the set of servers currently in operation
                 let servers = coordinator.get_servers();
                 let num_servers = servers.len() as u32;
 
-                // If no servers are available, sleep for 1 second and continue
+                // If no servers are available, sleep for a short time and continue
                 if num_servers == 0 {
                     std::thread::sleep(Duration::from_secs(1));
                     continue;
@@ -93,17 +96,19 @@ impl Estimator {
                 // Update each server with the estimated availability
                 for server_id in servers {
                     if let Some(server) = coordinator.get_server(server_id) {
-                        // The server receives the total available tickets from the database plus
-                        // allocated tickets
                         server
                             .write()
                             .unwrap()
                             .update_estimate(total_available_tickets);
                     }
-
-                    // Sleep for a fraction of the total round-trip time
-                    std::thread::sleep(Duration::from_secs((roundtrip_secs / num_servers) as u64));
                 }
+
+                // Sleep until the roundtrip duration has passed
+                let elapsed = Instant::now() - start_time;
+                let remaining_time = roundtrip_duration
+                    .checked_sub(elapsed)
+                    .unwrap_or(Duration::new(0, 0));
+                std::thread::sleep(remaining_time);
             }
         })
     }

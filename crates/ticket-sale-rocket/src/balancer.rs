@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, RwLock,
 };
 
@@ -14,6 +14,12 @@ pub struct Balancer {
     /// Maps customer IDs to server IDs to ensure requests from the same customer
     /// are routed to the same server.
     customer_server_map: RwLock<HashMap<Uuid, Uuid>>,
+
+    /// List of server IDs for round-robin assignment
+    server_ids: RwLock<Vec<Uuid>>,
+
+    /// Index for the round-robin assignment
+    round_robin_index: AtomicUsize,
 
     /// Optional `Coordinator` instance used for communication.
     coordinator: Option<Arc<Coordinator>>,
@@ -35,6 +41,8 @@ impl Balancer {
     pub fn new(coordinator: Option<Arc<Coordinator>>) -> Self {
         Self {
             customer_server_map: RwLock::new(HashMap::new()),
+            server_ids: RwLock::new(Vec::new()),
+            round_robin_index: AtomicUsize::new(0),
             coordinator,
             shutting_down: AtomicBool::new(false),
         }
@@ -60,20 +68,28 @@ impl Balancer {
         }
 
         // Fetch server IDs from the coordinator.
-        if let Some(coordinator) = &self.coordinator {
-            let server_ids = coordinator.get_servers();
-
-            // Assign a new server to the customer.
-            if let Some(&server_id) = server_ids.first() {
-                // Pick the first server for simplicity.
-                customer_server_map.insert(customer_id, server_id);
-                server_id
-            } else {
-                panic!("No servers available"); // Panic if no servers are available.
-            }
+        let server_ids = if let Some(coordinator) = &self.coordinator {
+            coordinator.get_servers()
         } else {
-            panic!("Coordinator not available"); // Panic if coordinator is not available.
+            panic!("Coordinator not available");
+        };
+
+        // Ensure server_ids is not empty
+        if server_ids.is_empty() {
+            panic!("No servers available");
         }
+
+        // Use round-robin to determine the server ID
+        let server_count = server_ids.len();
+        let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
+        let server_id = server_ids[index];
+
+        // Assign the selected server to the customer
+        customer_server_map.insert(customer_id, server_id);
+
+        println!("Assigned server {} to customer {}", server_id, customer_id);
+
+        server_id
     }
 }
 
@@ -103,22 +119,17 @@ impl RequestHandler for Balancer {
 
             // Handle the request for setting the number of servers
             RequestKind::SetNumServers => {
-                // Set the number of servers as read from the adminstrator..
-
                 let num_servers = rq.read_u32().unwrap_or(0) as usize;
-                let mut servers = self.customer_server_map.write().unwrap();
-                servers.clear();
-                servers.extend((0..num_servers).map(|_| (Uuid::new_v4(), Uuid::new_v4())));
+                let mut server_ids = self.server_ids.write().unwrap();
+                server_ids.clear();
+                server_ids.extend((0..num_servers).map(|_| Uuid::new_v4()));
                 rq.respond_with_int(num_servers as u32);
             }
 
             // Handle the request for getting the list of servers
             RequestKind::GetServers => {
-                // Respond with the list of available servers
-                let servers = self.customer_server_map.read().unwrap();
-                rq.respond_with_server_list(
-                    servers.values().cloned().collect::<Vec<Uuid>>().as_slice(),
-                );
+                let server_ids = self.server_ids.read().unwrap();
+                rq.respond_with_server_list(server_ids.as_slice());
             }
 
             // Default case for handling all other requests

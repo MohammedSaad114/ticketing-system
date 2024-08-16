@@ -43,7 +43,7 @@ impl Coordinator {
         for _ in 0..config.initial_servers {
             let server = Arc::new(RwLock::new(Server::new(
                 Arc::clone(&database),
-                config.tickets,
+                10,
                 reservation_timeout,
             )));
             let server_id = server.read().unwrap().id().clone();

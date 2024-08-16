@@ -109,12 +109,9 @@ impl RequestHandler for Balancer {
         match rq.kind() {
             // Handle the request for getting the number of servers
             RequestKind::GetNumServers => {
-                if let Some(coordinator) = &self.coordinator {
-                    let num_servers = coordinator.get_servers().len() as u32;
-                    rq.respond_with_int(num_servers);
-                } else {
-                    rq.respond_with_err("Coordinator not available.");
-                }
+                let num_servers = self.server_ids.read().unwrap().len() as u32;
+                rq.respond_with_int(num_servers);
+
             }
 
             // Handle the request for setting the number of servers

@@ -32,26 +32,36 @@ use database::Database;
 /// 📌 Hint: The function must construct a balancer which is served requests by the
 /// surrounding infrastructure.
 ///
-/// ⚠️ This functions must not be renamed and its signature must not be changed.
+/// ⚠️ This function must not be renamed and its signature must not be changed.
 /// added the tests
 pub fn launch(config: &Config) -> Balancer {
+    // Check if bonus functionality is requested in the config (not implemented)
     if config.bonus {
         todo!("Bonus not implemented!")
     }
 
-    let database = Arc::new(RwLock::new(Database::new(
-        config.tickets.try_into().unwrap(),
-    )));
+    // The use of Arc is a ensures that multiple threads can own a reference to the same
+    // data without risking data races or requiring additional synchronization
+    // mechanisms. Create a new Database instance wrapped in an RwLock for
+    // thread-safe read/write access (every thread can read, but exclusive writing.),
+    let database = Arc::new(RwLock::new(Database::new(config.tickets)));
+
+    // Create a new Coordinator instance wrapped in an Arc for shared ownership
     let coordinator = Arc::new(Coordinator::new(config.timeout, database.clone(), config));
 
+    // Create a new Balancer instance, providing it with the Coordinator
     let balancer = Balancer::new(Some(coordinator.clone()));
+
+    // Create a new Estimator instance, also wrapped in an Arc
     let estimator = Arc::new(Estimator::new(
-        coordinator.clone(),
-        database.clone(),
-        config.estimator_roundtrip_time,
+        coordinator.clone(),             // Pass the Coordinator instance
+        database.clone(),                // Pass the Database instance
+        config.estimator_roundtrip_time, // Configuration for roundtrip time estimation
     ));
 
+    // Start the Estimator to begin its operation
     estimator.start();
 
+    // Return the Balancer instance to handle incoming requests
     balancer
 }

@@ -1,72 +1,61 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
-
-// use std::time::Instant;
-use uuid::Uuid;
-
-use crate::server::TicketState;
-
+/// Implementation of the central database for tickets
 #[derive(Clone)]
 pub struct Database {
-    ticket_count: Arc<AtomicUsize>,
-    tickets: Arc<RwLock<HashMap<Uuid, TicketState>>>,
+    /// List of available tickets that have not yet been allocated by any server
+    unallocated: Vec<u32>,
 }
 
 impl Database {
-    pub fn new(ticket_count: usize) -> Self {
-        let mut tickets = HashMap::new();
-        for _ in 0..ticket_count {
-            tickets.insert(Uuid::new_v4(), TicketState::Available);
+    /// Create a new [`Database`].
+    ///
+    /// Initializes the database with `num_tickets` tickets, all of which are unallocated.
+    pub fn new(num_tickets: u32) -> Self {
+        // Create a vector of ticket IDs from 0 to num_tickets - 1
+        let unallocated: Vec<u32> = (0..num_tickets).collect();
+        Self { unallocated }
+    }
+
+    /// Get the number of available tickets.
+    ///
+    /// Returns the total number of tickets that are currently unallocated.
+    pub fn get_num_available(&self) -> u32 {
+        self.unallocated.len() as u32
+    }
+
+    /// Allocate `num_tickets` many tickets.
+    ///
+    /// The tickets are removed from the database and returned to the caller.
+    ///
+    /// # Parameters
+    /// - `num_tickets`: The number of tickets to allocate.
+    ///
+    /// # Returns
+    /// A vector containing the IDs of the allocated tickets.
+    pub fn allocate(&mut self, num_tickets: u32) -> Vec<u32> {
+        let mut tickets = Vec::with_capacity(num_tickets as usize);
+
+        // If requesting more tickets than available, return all available tickets
+        if num_tickets >= self.unallocated.len() as u32 {
+            return std::mem::take(&mut self.unallocated);
         }
 
-        Self {
-            ticket_count: Arc::new(AtomicUsize::new(ticket_count)),
-            tickets: Arc::new(RwLock::new(tickets)),
-        }
-    }
-
-    pub fn allocate_tickets(&self, count: usize) -> Vec<Uuid> {
-        let mut allocated_tickets = Vec::new();
-        let mut tickets = self.tickets.write().unwrap();
-
-        for (ticket_id, state) in tickets.iter_mut() {
-            if allocated_tickets.len() >= count {
-                break;
-            }
-
-            if matches!(state, TicketState::Available) {
-                *state = TicketState::Reserved;
-                allocated_tickets.push(*ticket_id);
-            }
-        }
-
-        allocated_tickets
-    }
-
-    pub fn get_ticket_state(&self, ticket_id: Uuid) -> Option<TicketState> {
-        self.tickets.read().unwrap().get(&ticket_id).cloned()
-    }
-
-    pub fn set_ticket_state(&self, ticket_id: Uuid, state: TicketState) {
-        self.tickets.write().unwrap().insert(ticket_id, state);
-    }
-
-    pub fn get_ticket_count(&self) -> usize {
-        self.ticket_count.load(Ordering::SeqCst)
-    }
-
-    pub fn adjust_ticket_count(&self, adjustment: isize) {
-        self.ticket_count
-            .fetch_add(adjustment as usize, Ordering::SeqCst);
-    }
-
-    /// Get the number of available tickets
-    pub fn get_num_available(&self) -> usize {
-        let tickets = self.tickets.read().unwrap();
+        // Calculate the split point to get the last `num_tickets` tickets
+        let split = self.unallocated.len() - num_tickets as usize;
+        // Extend the `tickets` vector with the last `num_tickets` tickets from `unallocated`
+        tickets.extend_from_slice(&self.unallocated[split..]);
+        // Truncate the `unallocated` vector to remove the allocated tickets
+        self.unallocated.truncate(split);
         tickets
-            .values()
-            .filter(|&&state| matches!(state, TicketState::Available))
-            .count()
+    }
+
+    /// Deallocate `tickets`.
+    ///
+    /// The provided tickets are added back to the pool of available tickets.
+    ///
+    /// # Parameters
+    /// - `tickets`: A slice of ticket IDs to be added back to the database.
+    pub fn deallocate(&mut self, tickets: &[u32]) {
+        // Extend the `unallocated` vector with the given tickets
+        self.unallocated.extend_from_slice(tickets);
     }
 }

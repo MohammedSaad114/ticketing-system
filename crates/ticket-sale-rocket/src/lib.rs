@@ -1,17 +1,7 @@
-//! 🚀 Your implementation of the ticket sales system must go here.
-//! lib.rs
-//!
-//! We already provide you with a skeleton of classes for the components of the
-//! system: The [database], [load balancer][balancer], [coordinator],
-//! [estimator], and [server].
-//!
-//! While you are free to modify anything in this module, your implementation
-//! must adhere to the project description regarding the components and their
-//! communication.
-
 #![allow(rustdoc::private_intra_doc_links)]
 
-use std::sync::{Arc, RwLock};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, RwLock};
 
 use estimator::Estimator;
 use ticket_sale_core::Config;
@@ -33,24 +23,26 @@ use database::Database;
 /// surrounding infrastructure.
 ///
 /// ⚠️ This function must not be renamed and its signature must not be changed.
-/// added the tests
 pub fn launch(config: &Config) -> Balancer {
     // Check if bonus functionality is requested in the config (not implemented)
     if config.bonus {
         todo!("Bonus not implemented!")
     }
 
-    // The use of Arc is a ensures that multiple threads can own a reference to the same
-    // data without risking data races or requiring additional synchronization
-    // mechanisms. Create a new Database instance wrapped in an RwLock for
-    // thread-safe read/write access (every thread can read, but exclusive writing.),
+    // Create a new Database instance wrapped in an RwLock for thread-safe read/write access
     let database = Arc::new(RwLock::new(Database::new(config.tickets)));
 
-    // Create a new Coordinator instance wrapped in an Arc for shared ownership
-    let coordinator = Arc::new(Coordinator::new(config.timeout, database.clone(), config));
+    // Create a communication channel for server updates between the Coordinator and the
+    // Balancer
+    let (server_update_tx, server_update_rx) = mpsc::channel();
+    let server_update_rx = Arc::new(Mutex::new(server_update_rx));
 
-    // Create a new Balancer instance, providing it with the Coordinator
-    let balancer = Balancer::new(Some(coordinator.clone()));
+    // Create a new Coordinator instance wrapped in an Arc for shared ownership
+    let coordinator = Arc::new(Coordinator::new(config, database.clone(), server_update_tx));
+
+    // Create a new Balancer instance, providing it with the Coordinator and the server update
+    // receiver
+    let balancer = Balancer::new(Some(coordinator.clone()), server_update_rx.clone());
 
     // Create a new Estimator instance, also wrapped in an Arc
     let estimator = Arc::new(Estimator::new(

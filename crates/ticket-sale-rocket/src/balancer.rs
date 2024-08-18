@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::sync::mpsc::Receiver;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc, RwLock,
+    Arc, Mutex, RwLock,
 };
 
 use ticket_sale_core::{Request, RequestHandler, RequestKind};
@@ -24,6 +25,9 @@ pub struct Balancer {
     /// Optional `Coordinator` instance used for communication.
     coordinator: Option<Arc<Coordinator>>,
 
+    /// Receiver for server update messages
+    server_update_rx: Arc<Mutex<Receiver<Vec<Uuid>>>>,
+
     /// Flag indicating if the balancer is currently shutting down.
     shutting_down: AtomicBool,
 }
@@ -34,16 +38,21 @@ impl Balancer {
     /// # Arguments
     ///
     /// * `coordinator` - An optional `Coordinator` instance for communication.
+    /// * `server_update_rx` - Receiver for server update messages.
     ///
     /// # Returns
     ///
     /// * `Self` - New instance of `Balancer`.
-    pub fn new(coordinator: Option<Arc<Coordinator>>) -> Self {
+    pub fn new(
+        coordinator: Option<Arc<Coordinator>>,
+        server_update_rx: Arc<Mutex<Receiver<Vec<Uuid>>>>,
+    ) -> Self {
         Self {
             customer_server_map: RwLock::new(HashMap::new()),
             server_ids: RwLock::new(Vec::new()),
             round_robin_index: AtomicUsize::new(0),
             coordinator,
+            server_update_rx,
             shutting_down: AtomicBool::new(false),
         }
     }
@@ -91,6 +100,20 @@ impl Balancer {
 
         server_id
     }
+
+    /// Polls for server update messages.
+    fn poll_server_updates(&self) {
+        // Acquire the lock on the receiver.
+        let receiver = self.server_update_rx.lock().unwrap();
+
+        while let Ok(server_ids) = receiver.try_recv() {
+            // Update server IDs in the balancer.
+            let mut server_ids_lock = self.server_ids.write().unwrap();
+            *server_ids_lock = server_ids;
+
+            println!("Updated server list: {:?}", *server_ids_lock);
+        }
+    }
 }
 
 impl RequestHandler for Balancer {
@@ -106,6 +129,9 @@ impl RequestHandler for Balancer {
             return;
         }
 
+        // Poll for server updates before handling the request.
+        self.poll_server_updates();
+
         match rq.kind() {
             // Handle the request for getting the number of servers
             RequestKind::GetNumServers => {
@@ -117,10 +143,12 @@ impl RequestHandler for Balancer {
             // Handle the request for setting the number of servers
             RequestKind::SetNumServers => {
                 let num_servers = rq.read_u32().unwrap_or(0) as usize;
-                let mut server_ids = self.server_ids.write().unwrap();
-                server_ids.clear();
-                server_ids.extend((0..num_servers).map(|_| Uuid::new_v4()));
-                rq.respond_with_int(num_servers as u32);
+                if let Some(coordinator) = &self.coordinator {
+                    coordinator.set_num_servers(num_servers);
+                    rq.respond_with_int(num_servers as u32);
+                } else {
+                    rq.respond_with_err("Coordinator not available.");
+                }
             }
 
             // Handle the request for getting the list of servers

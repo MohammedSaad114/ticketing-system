@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, RwLock,
@@ -10,175 +10,229 @@ use uuid::Uuid;
 
 use super::database::Database;
 
-/// Represents a single ticket
-#[derive(Clone, Copy, Debug)]
-pub enum TicketState {
-    Available,
-    Reserved,
-    Sold,
+/// Represents a server that handles ticket sales.
+pub struct Server {
+    /// Unique identifier for the server
+    id: Uuid,
+
+    /// Shared database instance
+    database: Arc<RwLock<Database>>,
+
+    /// Queue of available tickets managed by this server
+    available_tickets: Mutex<VecDeque<u32>>,
+
+    /// Map of customer reservations with reservation expiration timestamps
+    reservations: Mutex<HashMap<Uuid, Reservation>>,
+
+    /// Timeout duration for reservations
+    reservation_timeout: Duration,
+
+    /// Last estimate of available tickets received from the estimator
+    last_estimate: Mutex<u32>,
+
+    /// Flag indicating whether the server is currently running
+    running: AtomicBool,
 }
 
-/// Represents a server that handles ticket sales
-pub struct Server {
-    id: Uuid,
-    database: Arc<RwLock<Database>>,
-    tickets: Mutex<VecDeque<Uuid>>,
-    reservations: Mutex<HashMap<Uuid, (Uuid, Instant)>>,
-    reservation_timeout: Duration,
-    last_estimate: Mutex<u32>, // Field to store the last estimate received from the estimator
-    running: AtomicBool,       // Added field to control the running state
+/// Represents a ticket reservation.
+struct Reservation {
+    ticket: u32,
+    timestamp: Instant,
+}
+
+impl Reservation {
+    /// Creates a new `Reservation` instance with the current timestamp.
+    ///
+    /// # Arguments
+    ///
+    /// * `ticket` - The ticket ID being reserved
+    ///
+    /// # Returns
+    ///
+    /// * `Self` - New instance of `Reservation`
+    #[inline]
+    fn new(ticket: u32) -> Self {
+        Self {
+            ticket,
+            timestamp: Instant::now(),
+        }
+    }
 }
 
 impl Server {
+    /// Creates a new `Server` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `database` - Shared database instance
+    /// * `ticket_count` - Number of tickets to allocate to this server
+    /// * `reservation_timeout` - Timeout duration for reservations in seconds
+    /// * `coordinator` - Optional Coordinator instance for managing server info
+    ///
+    /// # Returns
+    ///
+    /// * `Self` - New instance of `Server`
     pub fn new(
         database: Arc<RwLock<Database>>,
         ticket_count: u32,
         reservation_timeout: u32,
     ) -> Self {
         let id = Uuid::new_v4();
-        let tickets = {
-            let db = database.write().unwrap();
-            let allocated_tickets = db.allocate_tickets(ticket_count as usize);
+        let available_tickets = {
+            // Lock the database for writing and allocate the specified number of tickets
+            let mut db = database.write().unwrap();
+            let allocated_tickets = db.allocate(ticket_count);
             Mutex::new(VecDeque::from(allocated_tickets))
         };
 
         Self {
             id,
             database,
-            tickets,
+            available_tickets,
             reservations: Mutex::new(HashMap::new()),
             reservation_timeout: Duration::from_secs(reservation_timeout.into()),
-            last_estimate: Mutex::new(0), // Initialize the last estimate
-            running: AtomicBool::new(true), // Initialize running state
+            last_estimate: Mutex::new(0),
+            running: AtomicBool::new(true),
         }
     }
 
+    /// Returns the unique identifier of the server.
     pub fn id(&self) -> Uuid {
         self.id
     }
 
-    pub fn handle_request(&self, rq: Request) {
+    /// Handles incoming requests by dispatching them to the appropriate handler based on
+    /// the request type.
+    ///
+    /// # Arguments
+    ///
+    /// * `rq` - The request to handle
+    pub fn handle_request(&self, mut rq: Request) {
+        // Check if the server is currently running
         if !self.running.load(Ordering::SeqCst) {
             rq.respond_with_err("Server is shutting down.");
             return;
         }
 
         match rq.kind() {
-            RequestKind::ReserveTicket => self.handle_reserve_ticket(rq),
-            RequestKind::BuyTicket => self.handle_buy_ticket(rq),
-            RequestKind::AbortPurchase => self.handle_abort_purchase(rq),
-            RequestKind::NumAvailableTickets => self.handle_num_available_tickets(rq),
+            // Handle fetching the number of available tickets
+            RequestKind::NumAvailableTickets => {
+                // Return the current estimate of available tickets
+                let estimate = *self.last_estimate.lock().unwrap();
+                rq.respond_with_int(estimate);
+            }
+
+            // Handle ticket reservation logic
+            RequestKind::ReserveTicket => {
+                rq.set_server_id(self.id);
+
+                let customer_id = rq.customer_id();
+
+                // Lock both reservations and available_tickets at once
+                let mut reservations = self.reservations.lock().unwrap();
+                let mut available_tickets = self.available_tickets.lock().unwrap();
+
+                // Check if the customer has already reserved a ticket
+                match reservations.entry(customer_id) {
+                    Entry::Occupied(_) => {
+                        rq.respond_with_err("A ticket has already been reserved!");
+                    }
+                    Entry::Vacant(entry) => {
+                        // Attempt to reserve a ticket
+                        if let Some(ticket) = available_tickets.pop_front() {
+                            entry.insert(Reservation::new(ticket));
+                            rq.respond_with_int(ticket);
+                        } else {
+                            // No tickets left to reserve
+                            rq.respond_with_sold_out();
+                        }
+                    }
+                }
+            }
+            // Handle the purchase of a reserved ticket
+            RequestKind::BuyTicket => {
+                rq.set_server_id(self.id);
+
+                if let Some(ticket_id) = rq.read_u32() {
+                    let customer_id = rq.customer_id();
+                    let mut reservations = self.reservations.lock().unwrap();
+
+                    // Check if the reservation exists for the customer
+                    if let Some(reservation) = reservations.get(&customer_id) {
+                        // Validate that the ticket ID matches the reserved ticket
+                        if ticket_id != reservation.ticket as u32 {
+                            rq.respond_with_err("Invalid ticket id provided!");
+                        } else {
+                            // Complete the purchase and remove the reservation
+                            reservations.remove(&customer_id);
+                            rq.respond_with_int(ticket_id);
+                        }
+                    } else {
+                        // No reservation found for the customer
+                        rq.respond_with_err("No ticket has been reserved!");
+                    }
+                } else {
+                    // The client didn't provide a ticket ID
+                    rq.respond_with_err("No ticket id provided!");
+                }
+            }
+
+            // Handle aborting a purchase (canceling a reservation)
+            RequestKind::AbortPurchase => {
+                rq.set_server_id(self.id);
+
+                if let Some(ticket_id) = rq.read_u32() {
+                    let customer_id = rq.customer_id();
+                    let mut reservations = self.reservations.lock().unwrap();
+                    let mut available_tickets = self.available_tickets.lock().unwrap();
+
+                    // Check if the reservation exists for the customer
+                    if let Some(reservation) = reservations.get(&customer_id) {
+                        // Validate that the ticket ID matches the reserved ticket
+                        if ticket_id != reservation.ticket as u32 {
+                            rq.respond_with_err("Invalid ticket id provided!");
+                        } else {
+                            // Cancel the reservation and return the ticket to the available pool
+                            reservations.remove(&customer_id);
+                            available_tickets.push_back(ticket_id as u32);
+                            rq.respond_with_int(ticket_id);
+                        }
+                    } else {
+                        // No reservation found for the customer
+                        rq.respond_with_err("No ticket has been reserved!");
+                    }
+                } else {
+                    // The client didn't provide a ticket ID
+                    rq.respond_with_err("No ticket id provided!");
+                }
+            }
+
+            // Handle unsupported request types
             _ => rq.respond_with_err("Unsupported request kind."),
         }
     }
 
-    fn handle_reserve_ticket(&self, rq: Request) {
-        if !self.running.load(Ordering::SeqCst) {
-            rq.respond_with_err("Server is shutting down.");
-            return;
-        }
-
-        let customer_id = rq.customer_id();
-        let now = Instant::now();
-
-        let mut reservations = self.reservations.lock().unwrap();
-        let tickets = self.tickets.lock().unwrap();
-
-        // Expire old reservations
-        reservations.retain(|_, &mut (_, timestamp)| {
-            now.duration_since(timestamp) < self.reservation_timeout
-        });
-
-        // Check if the customer already has a reservation
-        if let Some(&(ticket_id, _)) = reservations.get(&customer_id) {
-            rq.respond_with_int(ticket_id.as_u128() as u32);
-            return;
-        }
-
-        // Find an available ticket
-        if let Some(&ticket_id) = tickets.front() {
-            reservations.insert(customer_id, (ticket_id, now));
-            rq.respond_with_int(ticket_id.as_u128() as u32);
-        } else {
-            rq.respond_with_sold_out();
-        }
-    }
-
-    fn handle_buy_ticket(&self, mut rq: Request) {
-        if !self.running.load(Ordering::SeqCst) {
-            rq.respond_with_err("Server is shutting down.");
-            return;
-        }
-
-        let customer_id = rq.customer_id();
-        let ticket_id = Uuid::from_u128(rq.read_u32().unwrap_or_default() as u128);
-
-        let mut reservations = self.reservations.lock().unwrap();
-
-        if let Some(&(reserved_ticket_id, _)) = reservations.get(&customer_id) {
-            if reserved_ticket_id == ticket_id {
-                let db = self.database.write().unwrap();
-                db.set_ticket_state(ticket_id, TicketState::Sold);
-                reservations.remove(&customer_id);
-                rq.respond_with_int(ticket_id.as_u128() as u32);
-            } else {
-                rq.respond_with_err("Ticket ID mismatch.");
-            }
-        } else {
-            rq.respond_with_err("No reservation found.");
-        }
-    }
-
-    fn handle_abort_purchase(&self, mut rq: Request) {
-        if !self.running.load(Ordering::SeqCst) {
-            rq.respond_with_err("Server is shutting down.");
-            return;
-        }
-
-        let customer_id = rq.customer_id();
-        let ticket_id = Uuid::from_u128(rq.read_u32().unwrap_or_default() as u128);
-
-        let mut reservations = self.reservations.lock().unwrap();
-        let mut tickets = self.tickets.lock().unwrap();
-
-        if let Some(&(reserved_ticket_id, _)) = reservations.get(&customer_id) {
-            if reserved_ticket_id == ticket_id {
-                reservations.remove(&customer_id);
-                tickets.push_back(ticket_id);
-                rq.respond_with_int(ticket_id.as_u128() as u32);
-            } else {
-                rq.respond_with_err("Ticket ID mismatch.");
-            }
-        } else {
-            rq.respond_with_err("No reservation found.");
-        }
-    }
-
-    fn handle_num_available_tickets(&self, rq: Request) {
-        if !self.running.load(Ordering::SeqCst) {
-            rq.respond_with_err("Server is shutting down.");
-            return;
-        }
-
-        let tickets = self.tickets.lock().unwrap();
-        let estimate = self.last_estimate.lock().unwrap();
-        let available_tickets = tickets.len() as u32 + *estimate;
-        rq.respond_with_int(available_tickets);
-    }
-
-    /// Get the current number of allocated tickets.
+    /// Gets the current number of allocated tickets managed by this server.
+    ///
+    /// # Returns
+    ///
+    /// * `u32` - Number of allocated tickets
     pub fn get_allocated_ticket_count(&self) -> u32 {
-        let tickets = self.tickets.lock().unwrap();
-        tickets.len() as u32
+        self.available_tickets.lock().unwrap().len() as u32
     }
 
-    /// Update the estimate with the new value.
+    /// Updates the estimate of available tickets with the new value received from the
+    /// estimator.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_estimate` - The new estimate value to be updated
     pub fn update_estimate(&self, new_estimate: u32) {
         let mut last_estimate = self.last_estimate.lock().unwrap();
         *last_estimate = new_estimate;
     }
 
-    /// Shut down the server, stopping it from processing new requests.
+    /// Shuts down the server, stopping it from processing new requests.
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::SeqCst);
         println!("Server {} is shutting down", self.id);

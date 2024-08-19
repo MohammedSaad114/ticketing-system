@@ -137,7 +137,6 @@ impl RequestHandler for Balancer {
             RequestKind::GetNumServers => {
                 let num_servers = self.server_ids.read().unwrap().len() as u32;
                 rq.respond_with_int(num_servers);
-
             }
 
             // Handle the request for setting the number of servers
@@ -181,5 +180,12 @@ impl RequestHandler for Balancer {
     fn shutdown(self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         println!("Balancer is shutting down");
+
+        // shutdown the coordinator if it exists
+        if let Some(coordinator) = self.coordinator {
+            coordinator.shutdown();
+        }
+
+        println!("Balancer has been fully shut down");
     }
 }

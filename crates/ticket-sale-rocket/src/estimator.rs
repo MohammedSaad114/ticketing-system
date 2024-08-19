@@ -1,24 +1,45 @@
-use std::sync::atomic::Ordering;
-// estimator.rs
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
-use super::coordinator::Coordinator;
-use super::database::Database;
+use crate::{Coordinator, Database};
 
-/// Estimator that estimates the number of tickets available overall
+/// The `Estimator` is responsible for estimating and updating the resource availability
+/// for servers based on the current state of the `Database` and server configuration.
 pub struct Estimator {
+    /// A reference to the `Coordinator`, used to access and manage servers
     coordinator: Arc<Coordinator>,
+
+    /// A reference to the shared `Database`, used to get the number of available
+    /// resources
     database: Arc<RwLock<Database>>,
+
+    /// Time allocated for the estimation process in seconds
     roundtrip_secs: u32,
+
+    /// Flag indicating whether the `Estimator` is currently running
+    running: Arc<AtomicBool>,
+
+    /// Condvar and mutex to wait for shutdown completion
+    shutdown_cv: Arc<(Mutex<bool>, Condvar)>,
+    handle: Mutex<Option<JoinHandle<()>>>, // Handle wrapped in a Mutex
 }
 
 impl Estimator {
-    /// The estimator's main routine.
+    /// Creates a new `Estimator`.
     ///
-    /// `roundtrip_secs` is the time in seconds the estimator needs to contact all
-    /// servers. If there are `N` servers, then the estimator should wait
-    /// `roundtrip_secs / N` between each server when collecting statistics.
+    /// # Arguments
+    ///
+    /// * `coordinator` - The `Coordinator` instance used to access servers
+    /// * `database` - The `Database` instance used to get the number of available
+    ///   resources
+    /// * `roundtrip_secs` - Time allocated for the round-trip estimation process in
+    ///   seconds
+    ///
+    /// # Returns
+    ///
+    /// * `Self` - New instance of `Estimator`
     pub fn new(
         coordinator: Arc<Coordinator>,
         database: Arc<RwLock<Database>>,
@@ -28,20 +49,30 @@ impl Estimator {
             coordinator,
             database,
             roundtrip_secs,
+            running: Arc::new(AtomicBool::new(true)),
+            shutdown_cv: Arc::new((Mutex::new(false), Condvar::new())),
+            handle: Mutex::new(None), // Initialize with None
         }
     }
 
-    pub fn start(&self) -> std::thread::JoinHandle<()> {
+    /// Starts the `Estimator` in a separate thread to periodically update server
+    /// estimates.
+    ///
+    /// # Returns
+    ///
+    /// * `JoinHandle<()>` - Handle to the spawned thread
+    pub fn start(&self) {
         let coordinator = self.coordinator.clone();
         let database = self.database.clone();
         let roundtrip_secs = self.roundtrip_secs;
-        coordinator.running();
+        let running = self.running.clone();
+        let shutdown_cv = self.shutdown_cv.clone();
 
-        std::thread::spawn(move || {
-            let coordinator = coordinator.clone(); // Move coordinator into the closure
-            let running = coordinator.running(); // Move running inside the closure
-
+        let handle = std::thread::spawn(move || {
+            let roundtrip_duration = Duration::from_secs(roundtrip_secs as u64);
             while running.load(Ordering::SeqCst) {
+                let start_time = Instant::now();
+
                 let servers = coordinator.get_servers();
                 let num_servers = servers.len() as u32;
 
@@ -55,14 +86,58 @@ impl Estimator {
                     db.get_num_available()
                 };
 
+                let mut total_allocated_tickets = 0;
+                for server_id in &servers {
+                    if let Some(server) = coordinator.get_server(*server_id) {
+                        total_allocated_tickets +=
+                            server.read().unwrap().get_allocated_ticket_count();
+                    }
+                }
+
+                let total_available_tickets = db_available + total_allocated_tickets;
+
                 for server_id in servers {
                     if let Some(server) = coordinator.get_server(server_id) {
-                        server.write().unwrap().update_estimate(db_available);
+                        server
+                            .write()
+                            .unwrap()
+                            .update_estimate(total_available_tickets);
                     }
-
-                    std::thread::sleep(Duration::from_secs((roundtrip_secs / num_servers) as u64));
                 }
+
+                let elapsed = Instant::now() - start_time;
+                let remaining_time = roundtrip_duration
+                    .checked_sub(elapsed)
+                    .unwrap_or(Duration::new(0, 0));
+                std::thread::sleep(remaining_time);
             }
-        })
+
+            let (lock, cv) = &*shutdown_cv;
+            let mut shutdown_complete = lock.lock().unwrap();
+            *shutdown_complete = true;
+            cv.notify_all();
+        });
+
+        // Store the handle
+        *self.handle.lock().unwrap() = Some(handle);
+    }
+
+    /// Stops the `Estimator` by setting the running flag to false and waits for the
+    /// current iteration to complete gracefully.
+    pub fn shutdown(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        println!("Estimator is shutting down...");
+
+        let (lock, cv) = &*self.shutdown_cv;
+        let mut shutdown_complete = lock.lock().unwrap();
+        while !*shutdown_complete {
+            shutdown_complete = cv.wait(shutdown_complete).unwrap();
+        }
+
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            handle.join().unwrap();
+        }
+
+        println!("Estimator has shut down gracefully");
     }
 }

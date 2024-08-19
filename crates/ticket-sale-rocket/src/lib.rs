@@ -45,9 +45,9 @@ pub fn launch(config: &Config) -> Balancer {
 
     // Create a new Estimator instance, also wrapped in an Arc
     let estimator = Arc::new(Estimator::new(
-        coordinator.clone(),
-        database.clone(),
-        config.estimator_roundtrip_time,
+        coordinator.clone(),             // Pass the Coordinator instance
+        database.clone(),                // Pass the Database instance
+        config.estimator_roundtrip_time, // Configuration for roundtrip time estimation
     ));
 
     // Start the Estimator to begin its operation

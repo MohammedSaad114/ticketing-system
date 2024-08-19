@@ -76,11 +76,13 @@ impl Estimator {
                 let servers = coordinator.get_servers();
                 let num_servers = servers.len() as u32;
 
+                // If no servers are available, sleep for a short time and continue
                 if num_servers == 0 {
                     std::thread::sleep(Duration::from_secs(1));
                     continue;
                 }
 
+                // Query the database for the number of available tickets
                 let db_available = {
                     let db = database.read().unwrap();
                     db.get_num_available()
@@ -136,6 +138,22 @@ impl Estimator {
 
         if let Some(handle) = self.handle.lock().unwrap().take() {
             handle.join().unwrap();
+        }
+
+        println!("Estimator has shut down gracefully");
+    }
+
+    /// Stops the `Estimator` by setting the running flag to false and waits for the
+    /// current iteration to complete gracefully.
+    pub fn shutdown(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        println!("Estimator is shutting down...");
+
+        // Wait for the thread to finish
+        let (lock, cv) = &*self.shutdown_cv;
+        let mut shutdown_complete = lock.lock().unwrap();
+        while !*shutdown_complete {
+            shutdown_complete = cv.wait(shutdown_complete).unwrap();
         }
 
         println!("Estimator has shut down gracefully");

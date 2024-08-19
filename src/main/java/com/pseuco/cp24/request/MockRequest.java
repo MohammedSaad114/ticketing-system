@@ -3,6 +3,7 @@ package com.pseuco.cp24.request;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.lang.ref.Cleaner;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -18,6 +19,8 @@ import com.pseuco.cp24.rocket.Rocket;
  * </p>
  */
 public class MockRequest extends Request {
+
+    private static final Cleaner cleaner = Cleaner.create();
 
     /**
      * Pointer to the FFI response object.
@@ -69,12 +72,28 @@ public class MockRequest extends Request {
      * @param serverM     Most significant bits of the {@link ServerId}.
      * @param payload     Request body.
      */
-    private MockRequest(final long responsePtr, final int kind, final long customerL, final long customerM,
-            final boolean hasServerId, final long serverL, final long serverM, final int payload) {
+    private MockRequest(
+            final long responsePtr,
+            final int kind,
+            final long customerL, final long customerM,
+            final boolean hasServerId, final long serverL, final long serverM,
+            final int payload) {
         super(rawKindToMethod(kind), rawKindToKind(kind), new CustomerId(new UUID(customerM, customerL)),
                 hasServerId ? Optional.of(new ServerId(new UUID(serverM, serverL))) : Optional.empty());
         this.payload = payload >= 0 ? Optional.of(payload) : Optional.empty();
         this.responsePtr = responsePtr;
+        cleaner.register(this, new Dropper(responsePtr));
+    }
+
+    private static void makeRequest(
+            final RequestHandler balancer,
+            final long responsePtr,
+            final int kind,
+            final long customerL, final long customerM,
+            final boolean hasServerId, final long serverL, final long serverM,
+            final int payload) {
+        balancer.handle(new MockRequest(responsePtr, kind, customerL, customerM, hasServerId, serverL, serverM,
+                payload));
     }
 
     @Override
@@ -179,6 +198,20 @@ public class MockRequest extends Request {
 
     private static native void respondWithServerIds(long responsePtr, long serverIds[]);
 
+    private static native void dropResponseBox(long responsePtr);
+
+    private static class Dropper implements Runnable {
+        private final long responsePtr;
+
+        Dropper(final long responsePtr) {
+            this.responsePtr = responsePtr;
+        }
+
+        @Override
+        public void run() {
+            dropResponseBox(responsePtr);
+        }
+    }
 }
 
 class RocketLauncher {
@@ -198,6 +231,7 @@ class RocketLauncher {
     private RequestHandler balancer;
     private final ThreadGroup threadGroup;
     private final Thread[] balancerThreads;
+    private final Cleaner cleaner = Cleaner.create();
 
     private RocketLauncher(final Config config, final long[] balancerContexts, long printChannel)
             throws InterruptedException {

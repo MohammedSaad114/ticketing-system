@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::{Coordinator, Database};
@@ -19,6 +20,9 @@ pub struct Estimator {
 
     /// Flag indicating whether the `Estimator` is currently running
     running: Arc<AtomicBool>,
+
+    /// Condvar and mutex to wait for shutdown completion
+    shutdown_cv: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl Estimator {
@@ -45,6 +49,7 @@ impl Estimator {
             database,
             roundtrip_secs,
             running: Arc::new(AtomicBool::new(true)),
+            shutdown_cv: Arc::new((Mutex::new(false), Condvar::new())),
         }
     }
 
@@ -53,12 +58,13 @@ impl Estimator {
     ///
     /// # Returns
     ///
-    /// * `std::thread::JoinHandle<()>` - Handle to the spawned thread
-    pub fn start(&self) -> std::thread::JoinHandle<()> {
+    /// * `JoinHandle<()>` - Handle to the spawned thread
+    pub fn start(&self) -> JoinHandle<()> {
         let coordinator = self.coordinator.clone();
         let database = self.database.clone();
         let roundtrip_secs = self.roundtrip_secs;
         let running = self.running.clone();
+        let shutdown_cv = self.shutdown_cv.clone();
 
         std::thread::spawn(move || {
             let roundtrip_duration = Duration::from_secs(roundtrip_secs as u64);
@@ -110,12 +116,28 @@ impl Estimator {
                     .unwrap_or(Duration::new(0, 0));
                 std::thread::sleep(remaining_time);
             }
+
+            // Notify the shutdown completion
+            let (lock, cv) = &*shutdown_cv;
+            let mut shutdown_complete = lock.lock().unwrap();
+            *shutdown_complete = true;
+            cv.notify_all();
         })
     }
 
-    /// Stops the `Estimator` by setting the running flag to false.
+    /// Stops the `Estimator` by setting the running flag to false and waits for the
+    /// current iteration to complete gracefully.
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::SeqCst);
-        println!("Estimator is shutting down");
+        println!("Estimator is shutting down...");
+
+        // Wait for the thread to finish
+        let (lock, cv) = &*self.shutdown_cv;
+        let mut shutdown_complete = lock.lock().unwrap();
+        while !*shutdown_complete {
+            shutdown_complete = cv.wait(shutdown_complete).unwrap();
+        }
+
+        println!("Estimator has shut down gracefully");
     }
 }

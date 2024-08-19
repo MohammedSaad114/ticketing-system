@@ -1,12 +1,15 @@
 use std::collections::HashMap;
-use std::sync::{atomic::AtomicBool, mpsc::Sender, Arc, RwLock};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::Sender,
+    Arc, RwLock,
+};
 use std::thread;
 
 use ticket_sale_core::Config;
 use uuid::Uuid;
 
 use crate::database::Database;
-use crate::estimator::Estimator;
 use crate::server::Server;
 
 /// Coordinator manages the servers and the database, handling server scaling and request
@@ -20,9 +23,6 @@ pub struct Coordinator {
 
     /// Flag indicating if the coordinator is running
     running: AtomicBool,
-
-    /// Optional estimator used for scaling decisions
-    estimator: Option<Arc<Estimator>>,
 
     /// Sender for communicating the updated server list to the Balancer.
     server_update_tx: Sender<Vec<Uuid>>,
@@ -61,7 +61,7 @@ impl Coordinator {
             database,
             servers: RwLock::new(servers),
             running: AtomicBool::new(true),
-            estimator: None,
+
             server_update_tx,
             reservation_timeout: config.timeout,
         }
@@ -118,10 +118,10 @@ impl Coordinator {
             // Remove excess servers if the desired number is less than the current count.
             let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
             for server_id in server_ids.iter().skip(num_servers) {
-                servers.remove(server_id);
-                println!("Server {} removed", server_id);
-                // Properly shut down the server if needed (e.g., sending a shutdown
-                // signal)
+                if let Some(server) = servers.remove(server_id) {
+                    server.write().unwrap().shutdown(); // Gracefully shut down the server
+                    println!("Server {} removed", server_id);
+                }
             }
         }
 
@@ -152,5 +152,21 @@ impl Coordinator {
     /// * `Option<Arc<RwLock<Server>>>` - `Some(server)` if found, `None` otherwise
     pub fn get_server(&self, id: Uuid) -> Option<Arc<RwLock<Server>>> {
         self.servers.read().unwrap().get(&id).cloned()
+    }
+
+    /// Gracefully shuts down the coordinator and all its servers.
+    pub fn shutdown(&self) {
+        // Set the running flag to false to stop processing new requests.
+        self.running.store(false, Ordering::SeqCst);
+        println!("Coordinator is shutting down");
+
+        // Gracefully shut down each server.
+        let servers = self.servers.write().unwrap();
+        for (server_id, server) in servers.iter() {
+            println!("Shutting down server {}", server_id);
+            server.write().unwrap().shutdown();
+        }
+
+        println!("Coordinator has been fully shut down");
     }
 }

@@ -142,20 +142,4 @@ impl Estimator {
 
         println!("Estimator has shut down gracefully");
     }
-
-    /// Stops the `Estimator` by setting the running flag to false and waits for the
-    /// current iteration to complete gracefully.
-    pub fn shutdown(&self) {
-        self.running.store(false, Ordering::SeqCst);
-        println!("Estimator is shutting down...");
-
-        // Wait for the thread to finish
-        let (lock, cv) = &*self.shutdown_cv;
-        let mut shutdown_complete = lock.lock().unwrap();
-        while !*shutdown_complete {
-            shutdown_complete = cv.wait(shutdown_complete).unwrap();
-        }
-
-        println!("Estimator has shut down gracefully");
-    }
 }

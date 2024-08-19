@@ -53,7 +53,7 @@ impl Coordinator {
         // Initialize the servers based on the initial server count
         for _ in 0..config.initial_servers {
             let server = Self::spawn_server(database.clone(), config.timeout);
-            let server_id = server.read().unwrap().id().clone();
+            let server_id = server.read().unwrap().id();
             servers.insert(server_id, server);
         }
 
@@ -107,22 +107,27 @@ impl Coordinator {
     pub fn set_num_servers(&self, num_servers: usize) {
         let mut servers = self.servers.write().unwrap();
 
-        if num_servers > servers.len() {
-            // Add new servers if the desired number is greater than the current count.
-            for _ in servers.len()..num_servers {
-                let server = Self::spawn_server(self.database.clone(), self.reservation_timeout);
-                let server_id = server.read().unwrap().id().clone();
-                servers.insert(server_id, server);
-            }
-        } else if num_servers < servers.len() {
-            // Remove excess servers if the desired number is less than the current count.
-            let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
-            for server_id in server_ids.iter().skip(num_servers) {
-                if let Some(server) = servers.remove(server_id) {
-                    server.write().unwrap().shutdown(); // Gracefully shut down the server
-                    println!("Server {} removed", server_id);
+        match num_servers.cmp(&servers.len()) {
+            std::cmp::Ordering::Greater => {
+                // Add new servers if the desired number is greater than the current count.
+                for _ in servers.len()..num_servers {
+                    let server =
+                        Self::spawn_server(self.database.clone(), self.reservation_timeout);
+                    let server_id = server.read().unwrap().id();
+                    servers.insert(server_id, server);
                 }
             }
+            std::cmp::Ordering::Less => {
+                // Remove excess servers if the desired number is less than the current count.
+                let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
+                for server_id in server_ids.iter().skip(num_servers) {
+                    if let Some(server) = servers.remove(server_id) {
+                        server.write().unwrap().shutdown(); // Gracefully shut down the server
+                        println!("Server {} removed", server_id);
+                    }
+                }
+            }
+            _ => {}
         }
 
         // Send the updated list of server IDs to the Balancer.
@@ -156,15 +161,15 @@ impl Coordinator {
 
     /// Gracefully shuts down the coordinator and all its servers.
     pub fn shutdown(&self) {
-        // Set the running flag to false to stop processing new requests.
         self.running.store(false, Ordering::SeqCst);
         println!("Coordinator is shutting down");
 
-        // Gracefully shut down each server.
-        let servers = self.servers.write().unwrap();
+        let servers = self.servers.read().unwrap();
         for (server_id, server) in servers.iter() {
             println!("Shutting down server {}", server_id);
             server.write().unwrap().shutdown();
+            // Assuming the server has a way to join its thread, like
+            // `server.join().unwrap();`
         }
 
         println!("Coordinator has been fully shut down");

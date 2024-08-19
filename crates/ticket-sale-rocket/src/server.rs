@@ -180,7 +180,7 @@ impl Server {
                     // Check if the reservation exists for the customer.
                     if let Some(reservation) = reservations.get(&customer_id) {
                         // Validate that the ticket ID matches the reserved ticket.
-                        if ticket_id != reservation.ticket as u32 {
+                        if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
                             // Complete the purchase and remove the reservation.
@@ -209,12 +209,12 @@ impl Server {
                     // Check if the reservation exists for the customer.
                     if let Some(reservation) = reservations.get(&customer_id) {
                         // Validate that the ticket ID matches the reserved ticket.
-                        if ticket_id != reservation.ticket as u32 {
+                        if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
                             // Cancel the reservation and return the ticket to the available pool.
                             reservations.remove(&customer_id);
-                            available_tickets.push_back(ticket_id as u32);
+                            available_tickets.push_back(ticket_id);
                             rq.respond_with_int(ticket_id);
                         }
                     } else {

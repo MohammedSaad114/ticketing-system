@@ -10,7 +10,6 @@ mod balancer;
 mod coordinator;
 mod database;
 mod estimator;
-mod priority;
 mod server;
 
 pub use balancer::Balancer;
@@ -52,7 +51,7 @@ pub fn launch(config: &Config) -> Balancer {
     ));
 
     // Start the Estimator to begin its operation
-    estimator.start();
+    estimator.start(); // Start the estimator but do not return the handle
 
     // Return the Balancer instance to handle incoming requests
     balancer

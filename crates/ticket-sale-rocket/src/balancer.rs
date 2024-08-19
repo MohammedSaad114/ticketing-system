@@ -4,6 +4,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc, Mutex, RwLock,
 };
+use std::thread::JoinHandle;
 
 use ticket_sale_core::{Request, RequestHandler, RequestKind};
 use uuid::Uuid;
@@ -30,6 +31,7 @@ pub struct Balancer {
 
     /// Flag indicating if the balancer is currently shutting down.
     shutting_down: AtomicBool,
+    estimator_handle: Option<JoinHandle<()>>, // Field to store the Estimator's JoinHandle
 }
 
 impl Balancer {
@@ -54,7 +56,13 @@ impl Balancer {
             coordinator,
             server_update_rx,
             shutting_down: AtomicBool::new(false),
+            estimator_handle: None, // Initialize with None
         }
+    }
+
+    pub fn set_estimator_handle(mut self, handle: JoinHandle<()>) -> Self {
+        self.estimator_handle = Some(handle);
+        self
     }
 
     /// Assigns a server to a customer based on their ID using the `Coordinator` to get
@@ -181,9 +189,12 @@ impl RequestHandler for Balancer {
         self.shutting_down.store(true, Ordering::SeqCst);
         println!("Balancer is shutting down");
 
-        // shutdown the coordinator if it exists
         if let Some(coordinator) = self.coordinator {
             coordinator.shutdown();
+        }
+
+        if let Some(handle) = self.estimator_handle {
+            handle.join().unwrap(); // Wait for the Estimator to finish
         }
 
         println!("Balancer has been fully shut down");

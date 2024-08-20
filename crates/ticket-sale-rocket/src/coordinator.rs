@@ -64,7 +64,6 @@ impl Coordinator {
             database,
             servers: RwLock::new(servers),
             running: AtomicBool::new(true),
-
             message_tx,
             reservation_timeout: config.timeout,
         }
@@ -152,6 +151,23 @@ impl Coordinator {
     /// * `Option<Arc<RwLock<Server>>>` - `Some(server)` if found, `None` otherwise
     pub fn get_server(&self, id: Uuid) -> Option<Arc<RwLock<Server>>> {
         self.servers.read().unwrap().get(&id).cloned()
+    }
+
+    /// Checks if the server with the given ID is terminating.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - ID of the server to check
+    ///
+    /// # Returns
+    ///
+    /// * `bool` - `true` if the server is terminating, `false` otherwise
+    pub fn is_server_terminating(&self, id: Uuid) -> bool {
+        if let Some(server) = self.get_server(id) {
+            server.read().unwrap().terminating.load(Ordering::SeqCst)
+        } else {
+            false
+        }
     }
 
     pub fn run(&self, rx: Arc<Mutex<Receiver<CoordinatorMessage>>>) {

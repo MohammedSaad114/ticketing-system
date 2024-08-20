@@ -32,6 +32,9 @@ pub struct Server {
 
     /// Flag indicating whether the server is currently running.
     running: AtomicBool,
+
+    /// Flag indicating whether the server is currently terminating.
+    terminating: AtomicBool,
 }
 
 /// Represents a ticket reservation.
@@ -66,7 +69,7 @@ impl Reservation {
     ///
     /// # Returns
     ///
-    /// * `age` - in seconds`.
+    /// * `age` - in seconds.
     #[inline]
     fn age_secs(&self) -> u64 {
         self.timestamp.elapsed().as_secs()
@@ -106,6 +109,7 @@ impl Server {
             reservation_timeout: Duration::from_secs(reservation_timeout.into()),
             last_estimate: Mutex::new(0),
             running: AtomicBool::new(true),
+            terminating: AtomicBool::new(false),
         }
     }
 
@@ -134,6 +138,12 @@ impl Server {
     ///
     /// * `rq` - The request to handle.
     pub fn handle_request(&mut self, mut rq: Request) {
+        // Check if the server is currently terminating.
+        if self.terminating.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is terminating.");
+            return;
+        }
+
         // Check if the server is currently running.
         if !self.running.load(Ordering::SeqCst) {
             rq.respond_with_err("Server is shutting down.");
@@ -153,39 +163,44 @@ impl Server {
 
             // Handle ticket reservation logic.
             RequestKind::ReserveTicket => {
-                rq.set_server_id(self.id);
+                // If the server is terminating, reject reservation requests
+                if self.terminating.load(Ordering::SeqCst) {
+                    rq.respond_with_err("Server is terminating. Cannot reserve tickets.");
+                } else {
+                    rq.set_server_id(self.id);
 
-                let customer_id = rq.customer_id();
+                    let customer_id = rq.customer_id();
 
-                // Lock both reservations and available_tickets at once.
-                let mut reservations = self.reservations.lock().unwrap();
-                let mut available_tickets = self.available_tickets.lock().unwrap();
+                    // Lock both reservations and available_tickets at once.
+                    let mut reservations = self.reservations.lock().unwrap();
+                    let mut available_tickets = self.available_tickets.lock().unwrap();
 
-                // Check if the customer has already reserved a ticket.
-                match reservations.entry(customer_id) {
-                    Entry::Occupied(_) => {
-                        rq.respond_with_err("A ticket has already been reserved!");
-                    }
-                    Entry::Vacant(entry) => {
-                        // Attempt to reserve a ticket.
-                        if let Some(ticket) = available_tickets.pop_front() {
-                            entry.insert(Reservation::new(ticket));
-                            rq.respond_with_int(ticket);
-                        } else {
-                            // No tickets left to reserve; check the database for more.
-                            let mut db = self.database.write().unwrap();
-                            let additional_tickets = db.allocate(10); // Attempt to allocate more tickets
-
-                            if additional_tickets.is_empty() {
-                                // No additional tickets were allocated; notify that sold out
-                                rq.respond_with_sold_out();
+                    // Check if the customer has already reserved a ticket.
+                    match reservations.entry(customer_id) {
+                        Entry::Occupied(_) => {
+                            rq.respond_with_err("A ticket has already been reserved!");
+                        }
+                        Entry::Vacant(entry) => {
+                            // Attempt to reserve a ticket.
+                            if let Some(ticket) = available_tickets.pop_front() {
+                                entry.insert(Reservation::new(ticket));
+                                rq.respond_with_int(ticket);
                             } else {
-                                // Add the newly allocated tickets to the server's queue
-                                available_tickets.extend(additional_tickets);
-                                // Try reserving a ticket again
-                                if let Some(ticket) = available_tickets.pop_front() {
-                                    entry.insert(Reservation::new(ticket));
-                                    rq.respond_with_int(ticket);
+                                // No tickets left to reserve; check the database for more.
+                                let mut db = self.database.write().unwrap();
+                                let additional_tickets = db.allocate(10); // Attempt to allocate more tickets
+
+                                if additional_tickets.is_empty() {
+                                    // No additional tickets were allocated; notify that sold out
+                                    rq.respond_with_sold_out();
+                                } else {
+                                    // Add the newly allocated tickets to the server's queue
+                                    available_tickets.extend(additional_tickets);
+                                    // Try reserving a ticket again
+                                    if let Some(ticket) = available_tickets.pop_front() {
+                                        entry.insert(Reservation::new(ticket));
+                                        rq.respond_with_int(ticket);
+                                    }
                                 }
                             }
                         }
@@ -296,5 +311,32 @@ impl Server {
         }
 
         println!("Server {} has been fully shut down", self.id);
+    }
+
+    /// Mark the server for termination, ensuring no new requests are processed
+    /// and handle ongoing reservations.
+    pub fn terminate(&self) {
+        // Set the terminating flag to true to stop processing new requests and
+        // indicate that the server is in a termination state.
+        self.terminating.store(true, Ordering::SeqCst);
+        println!("Server {} is terminating", self.id);
+
+        // Gracefully shut down the server by stopping it from processing new requests
+        self.shutdown();
+
+        // Ensure reservations are handled or released properly
+        let mut reservations = self.reservations.lock().unwrap();
+        let mut available_tickets = self.available_tickets.lock().unwrap();
+
+        // Process any pending reservations during termination
+        for (customer_id, reservation) in reservations.drain() {
+            println!(
+                "Releasing ticket {} for customer {}",
+                reservation.ticket, customer_id
+            );
+            available_tickets.push_back(reservation.ticket);
+        }
+
+        println!("Server {} has been fully terminated", self.id);
     }
 }

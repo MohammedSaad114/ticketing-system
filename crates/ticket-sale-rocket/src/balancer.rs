@@ -168,7 +168,7 @@ impl RequestHandler for Balancer {
 
                 if let Some(coordinator) = &self.coordinator {
                     if let Some(server) = coordinator.get_server(server_id) {
-                        server.read().unwrap().handle_request(rq);
+                        server.write().unwrap().handle_request(rq);
                     } else {
                         rq.respond_with_err("Server not found.");
                     }

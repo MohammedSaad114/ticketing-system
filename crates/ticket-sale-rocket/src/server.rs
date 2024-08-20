@@ -32,6 +32,9 @@ pub struct Server {
 
     /// Flag indicating whether the server is currently running.
     running: AtomicBool,
+
+    /// Flag indicating whether the server is currently terminating.
+    terminating: AtomicBool,
 }
 
 /// Represents a ticket reservation.
@@ -66,7 +69,7 @@ impl Reservation {
     ///
     /// # Returns
     ///
-    /// * `age` - in seconds`.
+    /// * `age` - in seconds.
     #[inline]
     fn age_secs(&self) -> u64 {
         self.timestamp.elapsed().as_secs()
@@ -106,6 +109,7 @@ impl Server {
             reservation_timeout: Duration::from_secs(reservation_timeout.into()),
             last_estimate: Mutex::new(0),
             running: AtomicBool::new(true),
+            terminating: AtomicBool::new(false),
         }
     }
 
@@ -134,6 +138,12 @@ impl Server {
     ///
     /// * `rq` - The request to handle.
     pub fn handle_request(&mut self, mut rq: Request) {
+        // Check if the server is currently terminating.
+        if self.terminating.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is terminating.");
+            return;
+        }
+
         // Check if the server is currently running.
         if !self.running.load(Ordering::SeqCst) {
             rq.respond_with_err("Server is shutting down.");
@@ -153,6 +163,11 @@ impl Server {
 
             // Handle ticket reservation logic.
             RequestKind::ReserveTicket => {
+                // If the server is terminating, reject reservation requests
+                if self.terminating.load(Ordering::SeqCst) {
+                    rq.respond_with_err("Server is terminating. Cannot reserve tickets.");
+                }
+
                 rq.set_server_id(self.id);
 
                 let customer_id = rq.customer_id();
@@ -296,5 +311,32 @@ impl Server {
         }
 
         println!("Server {} has been fully shut down", self.id);
+    }
+
+    /// Mark the server for termination, ensuring no new requests are processed
+    /// and handle ongoing reservations.
+    pub fn terminate(&self) {
+        // Set the terminating flag to true to stop processing new requests and
+        // indicate that the server is in a termination state.
+        self.terminating.store(true, Ordering::SeqCst);
+        println!("Server {} is terminating", self.id);
+
+        // Gracefully shut down the server by stopping it from processing new requests
+        self.shutdown();
+
+        // Ensure reservations are handled or released properly
+        let mut reservations = self.reservations.lock().unwrap();
+        let mut available_tickets = self.available_tickets.lock().unwrap();
+
+        // Process any pending reservations during termination
+        for (customer_id, reservation) in reservations.drain() {
+            println!(
+                "Releasing ticket {} for customer {}",
+                reservation.ticket, customer_id
+            );
+            available_tickets.push_back(reservation.ticket);
+        }
+
+        println!("Server {} has been fully terminated", self.id);
     }
 }

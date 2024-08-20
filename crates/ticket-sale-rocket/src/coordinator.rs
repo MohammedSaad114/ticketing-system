@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::mpsc::Receiver;
+use std::sync::Mutex;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::Sender,
@@ -10,6 +12,7 @@ use ticket_sale_core::Config;
 use uuid::Uuid;
 
 use crate::database::Database;
+use crate::messages::CoordinatorMessage;
 use crate::server::Server;
 
 /// Coordinator manages the servers and the database, handling server scaling and request
@@ -25,7 +28,7 @@ pub struct Coordinator {
     running: AtomicBool,
 
     /// Sender for communicating the updated server list to the Balancer.
-    server_update_tx: Sender<Vec<Uuid>>,
+    message_tx: Sender<CoordinatorMessage>, // Unified message channel
 
     /// Timeout for server reservations.
     reservation_timeout: u32,
@@ -46,14 +49,14 @@ impl Coordinator {
     pub fn new(
         config: &Config,
         database: Arc<RwLock<Database>>,
-        server_update_tx: Sender<Vec<Uuid>>,
+        message_tx: Sender<CoordinatorMessage>,
     ) -> Self {
         let mut servers = HashMap::new();
 
         // Initialize the servers based on the initial server count
         for _ in 0..config.initial_servers {
             let server = Self::spawn_server(database.clone(), config.timeout);
-            let server_id = server.read().unwrap().id().clone();
+            let server_id = server.read().unwrap().id();
             servers.insert(server_id, server);
         }
 
@@ -62,7 +65,7 @@ impl Coordinator {
             servers: RwLock::new(servers),
             running: AtomicBool::new(true),
 
-            server_update_tx,
+            message_tx,
             reservation_timeout: config.timeout,
         }
     }
@@ -107,29 +110,26 @@ impl Coordinator {
     pub fn set_num_servers(&self, num_servers: usize) {
         let mut servers = self.servers.write().unwrap();
 
-        if num_servers > servers.len() {
-            // Add new servers if the desired number is greater than the current count.
-            for _ in servers.len()..num_servers {
-                let server = Self::spawn_server(self.database.clone(), self.reservation_timeout);
-                let server_id = server.read().unwrap().id().clone();
-                servers.insert(server_id, server);
-            }
-        } else if num_servers < servers.len() {
-            // Remove excess servers if the desired number is less than the current count.
-            let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
-            for server_id in server_ids.iter().skip(num_servers) {
-                if let Some(server) = servers.remove(server_id) {
-                    server.write().unwrap().shutdown(); // Gracefully shut down the server
-                    println!("Server {} removed", server_id);
+        match num_servers.cmp(&servers.len()) {
+            std::cmp::Ordering::Greater => {
+                for _ in servers.len()..num_servers {
+                    let server =
+                        Self::spawn_server(self.database.clone(), self.reservation_timeout);
+                    let server_id = server.read().unwrap().id();
+                    servers.insert(server_id, server);
                 }
             }
+            std::cmp::Ordering::Less => {
+                let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
+                for server_id in server_ids.iter().skip(num_servers) {
+                    if let Some(server) = servers.remove(server_id) {
+                        server.write().unwrap().shutdown(); // Gracefully shut down the server
+                        println!("Server {} removed", server_id);
+                    }
+                }
+            }
+            _ => {}
         }
-
-        // Send the updated list of server IDs to the Balancer.
-        let server_ids = servers.keys().cloned().collect();
-        self.server_update_tx
-            .send(server_ids)
-            .expect("Failed to send server update");
     }
 
     /// Retrieves a list of all server IDs.
@@ -154,14 +154,47 @@ impl Coordinator {
         self.servers.read().unwrap().get(&id).cloned()
     }
 
+    pub fn run(&self, rx: Arc<Mutex<Receiver<CoordinatorMessage>>>) {
+        while let Ok(message) = rx.lock().unwrap().recv() {
+            match message {
+                CoordinatorMessage::GetNumServers(sender) => {
+                    let num_servers = self.get_servers().len() as u32;
+                    sender.send(num_servers).unwrap();
+                }
+                CoordinatorMessage::SetNumServers(num, sender) => {
+                    self.set_num_servers(num);
+                    sender.send(num as u32).unwrap();
+                }
+                CoordinatorMessage::GetServers(sender) => {
+                    let server_ids = self.get_servers();
+                    sender.send(server_ids).unwrap();
+                }
+                CoordinatorMessage::ServerUpdate(server_id, update_value) => {
+                    // Find the server by its ID and forward the update
+                    if let Some(server) = self.get_server(server_id) {
+                        server.write().unwrap().update_estimate(update_value);
+                    } else {
+                        println!("Server with ID {} not found for update.", server_id);
+                    }
+                }
+                CoordinatorMessage::Shutdown => {
+                    self.shutdown();
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn get_message_tx(&self) -> Sender<CoordinatorMessage> {
+        self.message_tx.clone()
+    }
+
     /// Gracefully shuts down the coordinator and all its servers.
     pub fn shutdown(&self) {
-        // Set the running flag to false to stop processing new requests.
         self.running.store(false, Ordering::SeqCst);
         println!("Coordinator is shutting down");
 
-        // Gracefully shut down each server.
-        let servers = self.servers.write().unwrap();
+        let servers = self.servers.read().unwrap();
         for (server_id, server) in servers.iter() {
             println!("Shutting down server {}", server_id);
             server.write().unwrap().shutdown();

@@ -57,6 +57,20 @@ impl Reservation {
             timestamp: Instant::now(),
         }
     }
+
+    /// Returns the age of the ticket.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - instance of the ticket.
+    ///
+    /// # Returns
+    ///
+    /// * `age` - in seconds`.
+    #[inline]
+    fn age_secs(&self) -> u64 {
+        self.timestamp.elapsed().as_secs()
+    }
 }
 
 impl Server {
@@ -100,18 +114,34 @@ impl Server {
         self.id
     }
 
+    /// Abort and remove expired reservations
+    fn clear_expired_reservations(&mut self) {
+        let mut reservations = self.reservations.lock().unwrap();
+        reservations.retain(|_, res| {
+            if res.age_secs() > self.reservation_timeout.as_secs() {
+                self.available_tickets.lock().unwrap().push_back(res.ticket);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
     /// Handles incoming requests by dispatching them to the appropriate handler based on
     /// the request type.
     ///
     /// # Arguments
     ///
     /// * `rq` - The request to handle.
-    pub fn handle_request(&self, mut rq: Request) {
+    pub fn handle_request(&mut self, mut rq: Request) {
         // Check if the server is currently running.
         if !self.running.load(Ordering::SeqCst) {
             rq.respond_with_err("Server is shutting down.");
             return;
         }
+
+        // Clear expired reservations before handling the request
+        self.clear_expired_reservations();
 
         match rq.kind() {
             // Handle fetching the number of available tickets.
@@ -130,12 +160,6 @@ impl Server {
                 // Lock both reservations and available_tickets at once.
                 let mut reservations = self.reservations.lock().unwrap();
                 let mut available_tickets = self.available_tickets.lock().unwrap();
-
-                // Remove expired reservations before processing new ones
-                let now = Instant::now();
-                reservations.retain(|_, reservation| {
-                    now.duration_since(reservation.timestamp) < self.reservation_timeout
-                });
 
                 // Check if the customer has already reserved a ticket.
                 match reservations.entry(customer_id) {
@@ -180,7 +204,7 @@ impl Server {
                     // Check if the reservation exists for the customer.
                     if let Some(reservation) = reservations.get(&customer_id) {
                         // Validate that the ticket ID matches the reserved ticket.
-                        if ticket_id != reservation.ticket as u32 {
+                        if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
                             // Complete the purchase and remove the reservation.
@@ -209,12 +233,12 @@ impl Server {
                     // Check if the reservation exists for the customer.
                     if let Some(reservation) = reservations.get(&customer_id) {
                         // Validate that the ticket ID matches the reserved ticket.
-                        if ticket_id != reservation.ticket as u32 {
+                        if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
                             // Cancel the reservation and return the ticket to the available pool.
                             reservations.remove(&customer_id);
-                            available_tickets.push_back(ticket_id as u32);
+                            available_tickets.push_back(ticket_id);
                             rq.respond_with_int(ticket_id);
                         }
                     } else {

@@ -23,6 +23,7 @@ pub struct Estimator {
 
     /// Condvar and mutex to wait for shutdown completion
     shutdown_cv: Arc<(Mutex<bool>, Condvar)>,
+    handle: Mutex<Option<JoinHandle<()>>>, // Handle wrapped in a Mutex
 }
 
 impl Estimator {
@@ -50,6 +51,7 @@ impl Estimator {
             roundtrip_secs,
             running: Arc::new(AtomicBool::new(true)),
             shutdown_cv: Arc::new((Mutex::new(false), Condvar::new())),
+            handle: Mutex::new(None), // Initialize with None
         }
     }
 
@@ -59,19 +61,18 @@ impl Estimator {
     /// # Returns
     ///
     /// * `JoinHandle<()>` - Handle to the spawned thread
-    pub fn start(&self) -> JoinHandle<()> {
+    pub fn start(&self) {
         let coordinator = self.coordinator.clone();
         let database = self.database.clone();
         let roundtrip_secs = self.roundtrip_secs;
         let running = self.running.clone();
         let shutdown_cv = self.shutdown_cv.clone();
 
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let roundtrip_duration = Duration::from_secs(roundtrip_secs as u64);
             while running.load(Ordering::SeqCst) {
                 let start_time = Instant::now();
 
-                // Determine the set of servers currently in operation
                 let servers = coordinator.get_servers();
                 let num_servers = servers.len() as u32;
 
@@ -87,7 +88,6 @@ impl Estimator {
                     db.get_num_available()
                 };
 
-                // Calculate the total number of tickets allocated across all servers
                 let mut total_allocated_tickets = 0;
                 for server_id in &servers {
                     if let Some(server) = coordinator.get_server(*server_id) {
@@ -96,10 +96,8 @@ impl Estimator {
                     }
                 }
 
-                // Total available tickets including the tickets held by servers
                 let total_available_tickets = db_available + total_allocated_tickets;
 
-                // Update each server with the estimated availability
                 for server_id in servers {
                     if let Some(server) = coordinator.get_server(server_id) {
                         server
@@ -109,7 +107,6 @@ impl Estimator {
                     }
                 }
 
-                // Sleep until the roundtrip duration has passed
                 let elapsed = Instant::now() - start_time;
                 let remaining_time = roundtrip_duration
                     .checked_sub(elapsed)
@@ -117,12 +114,14 @@ impl Estimator {
                 std::thread::sleep(remaining_time);
             }
 
-            // Notify the shutdown completion
             let (lock, cv) = &*shutdown_cv;
             let mut shutdown_complete = lock.lock().unwrap();
             *shutdown_complete = true;
             cv.notify_all();
-        })
+        });
+
+        // Store the handle
+        *self.handle.lock().unwrap() = Some(handle);
     }
 
     /// Stops the `Estimator` by setting the running flag to false and waits for the
@@ -131,11 +130,14 @@ impl Estimator {
         self.running.store(false, Ordering::SeqCst);
         println!("Estimator is shutting down...");
 
-        // Wait for the thread to finish
         let (lock, cv) = &*self.shutdown_cv;
         let mut shutdown_complete = lock.lock().unwrap();
         while !*shutdown_complete {
             shutdown_complete = cv.wait(shutdown_complete).unwrap();
+        }
+
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            handle.join().unwrap();
         }
 
         println!("Estimator has shut down gracefully");

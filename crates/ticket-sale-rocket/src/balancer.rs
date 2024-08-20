@@ -71,39 +71,32 @@ impl Balancer {
     ///
     /// * `Uuid` - The ID of the assigned server.
     fn assign_server(&self, customer_id: Uuid) -> Option<Uuid> {
-        // Acquire write lock on the customer-to-server map.
         let mut customer_server_map = self.customer_server_map.write().unwrap();
 
-        // Check if the customer already has an assigned server.
         if let Some(&server_id) = customer_server_map.get(&customer_id) {
-            return Some(server_id); // Return the previously assigned server ID.
+            return Some(server_id);
         }
 
-        // Fetch server IDs from the coordinator.
         let server_ids = if let Some(coordinator) = &self.coordinator {
             coordinator.get_servers()
         } else {
             panic!("Coordinator not available");
         };
 
-        // Ensure server_ids is not empty
         if server_ids.is_empty() {
             panic!("No servers available");
         }
 
-        // Use round-robin to determine the server ID
         let server_count = server_ids.len();
         let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
         let server_id = server_ids[index];
 
-        // Check if the selected server is terminating
         let terminating = if let Some(coordinator) = &self.coordinator {
             coordinator.is_server_terminating(server_id)
         } else {
             false
         };
 
-        // If the server is terminating, find a non-terminating server
         if terminating {
             for &id in &server_ids {
                 if id != server_id && !self.coordinator.as_ref().unwrap().is_server_terminating(id)
@@ -111,14 +104,11 @@ impl Balancer {
                     return Some(id);
                 }
             }
-            return None; // All servers are terminating
+            return None;
         }
 
-        // Assign the selected server to the customer
         customer_server_map.insert(customer_id, server_id);
-
         println!("Assigned server {} to customer {}", server_id, customer_id);
-
         Some(server_id)
     }
 }
@@ -219,7 +209,7 @@ impl RequestHandler for Balancer {
         }
 
         if let Some(handle) = self.estimator_handle {
-            handle.join().unwrap(); // Wait for the Estimator to finish
+            handle.join().unwrap();
         }
 
         println!("Balancer has been fully shut down");

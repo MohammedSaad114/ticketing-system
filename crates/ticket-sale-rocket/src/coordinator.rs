@@ -52,8 +52,6 @@ impl Coordinator {
         message_tx: Sender<CoordinatorMessage>,
     ) -> Self {
         let mut servers = HashMap::new();
-
-        // Initialize the servers based on the initial server count
         for _ in 0..config.initial_servers {
             let server = Self::spawn_server(database.clone(), config.timeout);
             let server_id = server.read().unwrap().id();
@@ -85,17 +83,14 @@ impl Coordinator {
     ) -> Arc<RwLock<Server>> {
         let server = Arc::new(RwLock::new(Server::new(
             Arc::clone(&database),
-            10, // Example setting, can be modified based on needs
+            10,
             reservation_timeout,
         )));
         let server_clone = Arc::clone(&server);
 
-        // Spawn a new thread to handle the server
         thread::spawn(move || {
             let server_id = server_clone.read().unwrap().id();
             println!("Server {} started", server_id);
-            // Here, the server could enter its main loop, e.g., waiting for and handling
-            // requests. This is just a placeholder for actual server logic.
         });
 
         server
@@ -110,20 +105,30 @@ impl Coordinator {
         let mut servers = self.servers.write().unwrap();
 
         match num_servers.cmp(&servers.len()) {
+            // Increase the number of servers
             std::cmp::Ordering::Greater => {
                 for _ in servers.len()..num_servers {
                     let server =
                         Self::spawn_server(self.database.clone(), self.reservation_timeout);
                     let server_id = server.read().unwrap().id();
                     servers.insert(server_id, server);
+                    // Notify the Balancer of the new server
+                    self.message_tx
+                        .send(CoordinatorMessage::ServerUpdate(server_id, 0))
+                        .unwrap();
                 }
             }
+            // Decrease the number of servers
             std::cmp::Ordering::Less => {
                 let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
                 for server_id in server_ids.iter().skip(num_servers) {
                     if let Some(server) = servers.remove(server_id) {
-                        server.write().unwrap().shutdown(); // Gracefully shut down the server
+                        server.write().unwrap().shutdown();
                         println!("Server {} removed", server_id);
+                        // Notify the Balancer of the removed server
+                        self.message_tx
+                            .send(CoordinatorMessage::ServerUpdate(*server_id, 1))
+                            .unwrap();
                     }
                 }
             }
@@ -170,6 +175,7 @@ impl Coordinator {
         }
     }
 
+    /// Handles incoming messages and updates the coordinator state accordingly.
     pub fn run(&self, rx: Arc<Mutex<Receiver<CoordinatorMessage>>>) {
         while let Ok(message) = rx.lock().unwrap().recv() {
             match message {
@@ -186,7 +192,6 @@ impl Coordinator {
                     sender.send(server_ids).unwrap();
                 }
                 CoordinatorMessage::ServerUpdate(server_id, update_value) => {
-                    // Find the server by its ID and forward the update
                     if let Some(server) = self.get_server(server_id) {
                         server.write().unwrap().update_estimate(update_value);
                     } else {
@@ -201,11 +206,12 @@ impl Coordinator {
         }
     }
 
+    /// Returns the message sender for communicating with the Balancer.
     pub fn get_message_tx(&self) -> Sender<CoordinatorMessage> {
         self.message_tx.clone()
     }
 
-    /// Gracefully shuts down the coordinator and all its servers.
+    /// Shuts down the Coordinator and all managed servers.
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::SeqCst);
         println!("Coordinator is shutting down");

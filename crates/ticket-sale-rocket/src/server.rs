@@ -34,7 +34,7 @@ pub struct Server {
     running: AtomicBool,
 
     /// Flag indicating whether the server is currently terminating.
-    terminating: AtomicBool,
+    pub terminating: AtomicBool,
 }
 
 /// Represents a ticket reservation.
@@ -118,7 +118,7 @@ impl Server {
         self.id
     }
 
-    /// Abort and remove expired reservations
+    /// Abort and remove expired reservations.
     fn clear_expired_reservations(&mut self) {
         let mut reservations = self.reservations.lock().unwrap();
         reservations.retain(|_, res| {
@@ -150,7 +150,7 @@ impl Server {
             return;
         }
 
-        // Clear expired reservations before handling the request
+        // Clear expired reservations before handling the request.
         self.clear_expired_reservations();
 
         match rq.kind() {
@@ -163,7 +163,7 @@ impl Server {
 
             // Handle ticket reservation logic.
             RequestKind::ReserveTicket => {
-                // If the server is terminating, reject reservation requests
+                // If the server is terminating, reject reservation requests.
                 if self.terminating.load(Ordering::SeqCst) {
                     rq.respond_with_err("Server is terminating. Cannot reserve tickets.");
                 } else {
@@ -191,12 +191,12 @@ impl Server {
                                 let additional_tickets = db.allocate(10); // Attempt to allocate more tickets
 
                                 if additional_tickets.is_empty() {
-                                    // No additional tickets were allocated; notify that sold out
+                                    // No additional tickets were allocated; notify that sold out.
                                     rq.respond_with_sold_out();
                                 } else {
-                                    // Add the newly allocated tickets to the server's queue
+                                    // Add the newly allocated tickets to the server's queue.
                                     available_tickets.extend(additional_tickets);
-                                    // Try reserving a ticket again
+                                    // Try reserving a ticket again.
                                     if let Some(ticket) = available_tickets.pop_front() {
                                         entry.insert(Reservation::new(ticket));
                                         rq.respond_with_int(ticket);
@@ -297,11 +297,11 @@ impl Server {
         self.running.store(false, Ordering::SeqCst);
         println!("Server {} is shutting down", self.id);
 
-        // Ensure reservations are handled or released properly
+        // Ensure reservations are handled or released properly.
         let mut reservations = self.reservations.lock().unwrap();
         let mut available_tickets = self.available_tickets.lock().unwrap();
 
-        // Process any pending reservations before shutdown
+        // Process any pending reservations before shutdown.
         for (customer_id, reservation) in reservations.drain() {
             println!(
                 "Releasing ticket {} for customer {}",
@@ -319,24 +319,24 @@ impl Server {
         self.terminating.store(true, Ordering::SeqCst);
         println!("Server {} is terminating", self.id);
 
-        // Gracefully shut down the server
+        // Gracefully shut down the server.
         self.shutdown();
 
-        // Process any pending reservations during termination
+        // Process any pending reservations during termination.
         let mut reservations = self.reservations.lock().unwrap();
         let mut available_tickets = self.available_tickets.lock().unwrap();
 
-        // Return canceled tickets to the central database
+        // Return canceled tickets to the central database.
         let mut db = self.database.write().unwrap();
         let tickets_to_return: Vec<u32> = reservations
             .drain()
             .map(|(_, reservation)| reservation.ticket)
             .collect();
 
-        // Add tickets back to the central database
+        // Add tickets back to the central database.
         db.deallocate(&tickets_to_return);
 
-        // Also add remaining available tickets to the database
+        // Also add remaining available tickets to the database.
         let remaining_tickets: Vec<u32> = available_tickets.drain(..).collect();
         db.deallocate(&remaining_tickets);
 

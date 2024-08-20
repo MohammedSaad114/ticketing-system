@@ -26,7 +26,12 @@ pub struct Balancer {
 
     /// Flag indicating if the balancer is currently shutting down.
     shutting_down: AtomicBool,
-    estimator_handle: Option<JoinHandle<()>>, // Field to store the Estimator's JoinHandle
+
+    /// Flag indicating if the balancer is currently terminating.
+    terminating: AtomicBool,
+
+    /// Field to store the Estimator's JoinHandle
+    estimator_handle: Option<JoinHandle<()>>,
 }
 
 impl Balancer {
@@ -35,7 +40,6 @@ impl Balancer {
     /// # Arguments
     ///
     /// * `coordinator` - An optional `Coordinator` instance for communication.
-    /// * `server_update_rx` - Receiver for server update messages.
     ///
     /// # Returns
     ///
@@ -46,7 +50,8 @@ impl Balancer {
             round_robin_index: AtomicUsize::new(0),
             coordinator,
             shutting_down: AtomicBool::new(false),
-            estimator_handle: None, // Initialize with None
+            terminating: AtomicBool::new(false),
+            estimator_handle: None,
         }
     }
 
@@ -65,13 +70,13 @@ impl Balancer {
     /// # Returns
     ///
     /// * `Uuid` - The ID of the assigned server.
-    fn assign_server(&self, customer_id: Uuid) -> Uuid {
+    fn assign_server(&self, customer_id: Uuid) -> Option<Uuid> {
         // Acquire write lock on the customer-to-server map.
         let mut customer_server_map = self.customer_server_map.write().unwrap();
 
         // Check if the customer already has an assigned server.
         if let Some(&server_id) = customer_server_map.get(&customer_id) {
-            return server_id; // Return the previously assigned server ID.
+            return Some(server_id); // Return the previously assigned server ID.
         }
 
         // Fetch server IDs from the coordinator.
@@ -91,12 +96,30 @@ impl Balancer {
         let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
         let server_id = server_ids[index];
 
+        // Check if the selected server is terminating
+        let terminating = if let Some(coordinator) = &self.coordinator {
+            coordinator.is_server_terminating(server_id)
+        } else {
+            false
+        };
+
+        // If the server is terminating, find a non-terminating server
+        if terminating {
+            for &id in &server_ids {
+                if id != server_id && !self.coordinator.as_ref().unwrap().is_server_terminating(id)
+                {
+                    return Some(id);
+                }
+            }
+            return None; // All servers are terminating
+        }
+
         // Assign the selected server to the customer
         customer_server_map.insert(customer_id, server_id);
 
         println!("Assigned server {} to customer {}", server_id, customer_id);
 
-        server_id
+        Some(server_id)
     }
 }
 
@@ -113,7 +136,12 @@ impl RequestHandler for Balancer {
             return;
         }
 
-        // Poll for server updates before handling the request.
+        // Check if the balancer is terminating.
+        if self.terminating.load(Ordering::SeqCst) {
+            rq.respond_with_err("Balancer is terminating.");
+            return;
+        }
+
         match rq.kind() {
             // Handle the request for getting the number of servers
             RequestKind::GetNumServers => {
@@ -161,19 +189,21 @@ impl RequestHandler for Balancer {
                 }
             }
 
-            // Default case for handling all other requests
+            // Handle all other request types
             _ => {
                 let customer_id = rq.customer_id();
-                let server_id = self.assign_server(customer_id);
-
-                if let Some(coordinator) = &self.coordinator {
-                    if let Some(server) = coordinator.get_server(server_id) {
-                        server.write().unwrap().handle_request(rq);
+                if let Some(server_id) = self.assign_server(customer_id) {
+                    if let Some(coordinator) = &self.coordinator {
+                        if let Some(server) = coordinator.get_server(server_id) {
+                            server.write().unwrap().handle_request(rq);
+                        } else {
+                            rq.respond_with_err("Server not found.");
+                        }
                     } else {
-                        rq.respond_with_err("Server not found.");
+                        rq.respond_with_err("Coordinator not available.");
                     }
                 } else {
-                    rq.respond_with_err("Coordinator not available.");
+                    rq.respond_with_err("No available servers.");
                 }
             }
         }

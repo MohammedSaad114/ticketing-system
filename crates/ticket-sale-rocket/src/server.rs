@@ -316,26 +316,29 @@ impl Server {
     /// Mark the server for termination, ensuring no new requests are processed
     /// and handle ongoing reservations.
     pub fn terminate(&self) {
-        // Set the terminating flag to true to stop processing new requests and
-        // indicate that the server is in a termination state.
         self.terminating.store(true, Ordering::SeqCst);
         println!("Server {} is terminating", self.id);
 
-        // Gracefully shut down the server by stopping it from processing new requests
+        // Gracefully shut down the server
         self.shutdown();
 
-        // Ensure reservations are handled or released properly
+        // Process any pending reservations during termination
         let mut reservations = self.reservations.lock().unwrap();
         let mut available_tickets = self.available_tickets.lock().unwrap();
 
-        // Process any pending reservations during termination
-        for (customer_id, reservation) in reservations.drain() {
-            println!(
-                "Releasing ticket {} for customer {}",
-                reservation.ticket, customer_id
-            );
-            available_tickets.push_back(reservation.ticket);
-        }
+        // Return canceled tickets to the central database
+        let mut db = self.database.write().unwrap();
+        let tickets_to_return: Vec<u32> = reservations
+            .drain()
+            .map(|(_, reservation)| reservation.ticket)
+            .collect();
+
+        // Add tickets back to the central database
+        db.deallocate(&tickets_to_return);
+
+        // Also add remaining available tickets to the database
+        let remaining_tickets: Vec<u32> = available_tickets.drain(..).collect();
+        db.deallocate(&remaining_tickets);
 
         println!("Server {} has been fully terminated", self.id);
     }

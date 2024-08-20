@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{self};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc, Mutex, RwLock,
+    Arc, RwLock,
 };
 use std::thread::JoinHandle;
 
@@ -10,6 +10,7 @@ use ticket_sale_core::{Request, RequestHandler, RequestKind};
 use uuid::Uuid;
 
 use crate::coordinator::Coordinator;
+use crate::messages::CoordinatorMessage;
 
 /// Implementation of the load balancer
 pub struct Balancer {
@@ -17,17 +18,11 @@ pub struct Balancer {
     /// are routed to the same server.
     customer_server_map: RwLock<HashMap<Uuid, Uuid>>,
 
-    /// List of server IDs for round-robin assignment
-    server_ids: RwLock<Vec<Uuid>>,
-
     /// Index for the round-robin assignment
     round_robin_index: AtomicUsize,
 
     /// Optional `Coordinator` instance used for communication.
     coordinator: Option<Arc<Coordinator>>,
-
-    /// Receiver for server update messages
-    server_update_rx: Arc<Mutex<Receiver<Vec<Uuid>>>>,
 
     /// Flag indicating if the balancer is currently shutting down.
     shutting_down: AtomicBool,
@@ -45,16 +40,11 @@ impl Balancer {
     /// # Returns
     ///
     /// * `Self` - New instance of `Balancer`.
-    pub fn new(
-        coordinator: Option<Arc<Coordinator>>,
-        server_update_rx: Arc<Mutex<Receiver<Vec<Uuid>>>>,
-    ) -> Self {
+    pub fn new(coordinator: Option<Arc<Coordinator>>) -> Self {
         Self {
             customer_server_map: RwLock::new(HashMap::new()),
-            server_ids: RwLock::new(Vec::new()),
             round_robin_index: AtomicUsize::new(0),
             coordinator,
-            server_update_rx,
             shutting_down: AtomicBool::new(false),
             estimator_handle: None, // Initialize with None
         }
@@ -108,20 +98,6 @@ impl Balancer {
 
         server_id
     }
-
-    /// Polls for server update messages.
-    fn poll_server_updates(&self) {
-        // Acquire the lock on the receiver.
-        let receiver = self.server_update_rx.lock().unwrap();
-
-        while let Ok(server_ids) = receiver.try_recv() {
-            // Update server IDs in the balancer.
-            let mut server_ids_lock = self.server_ids.write().unwrap();
-            *server_ids_lock = server_ids;
-
-            println!("Updated server list: {:?}", *server_ids_lock);
-        }
-    }
 }
 
 impl RequestHandler for Balancer {
@@ -138,21 +114,33 @@ impl RequestHandler for Balancer {
         }
 
         // Poll for server updates before handling the request.
-        self.poll_server_updates();
-
         match rq.kind() {
             // Handle the request for getting the number of servers
             RequestKind::GetNumServers => {
-                let num_servers = self.server_ids.read().unwrap().len() as u32;
-                rq.respond_with_int(num_servers);
+                if let Some(coordinator) = &self.coordinator {
+                    let (response_tx, response_rx) = mpsc::channel();
+                    coordinator
+                        .get_message_tx()
+                        .send(CoordinatorMessage::GetNumServers(response_tx))
+                        .unwrap();
+                    let num_servers = response_rx.recv().unwrap();
+                    rq.respond_with_int(num_servers);
+                } else {
+                    rq.respond_with_err("Coordinator not available.");
+                }
             }
 
             // Handle the request for setting the number of servers
             RequestKind::SetNumServers => {
                 let num_servers = rq.read_u32().unwrap_or(0) as usize;
                 if let Some(coordinator) = &self.coordinator {
-                    coordinator.set_num_servers(num_servers);
-                    rq.respond_with_int(num_servers as u32);
+                    let (response_tx, response_rx) = mpsc::channel();
+                    coordinator
+                        .get_message_tx()
+                        .send(CoordinatorMessage::SetNumServers(num_servers, response_tx))
+                        .unwrap();
+                    let updated_servers = response_rx.recv().unwrap();
+                    rq.respond_with_int(updated_servers);
                 } else {
                     rq.respond_with_err("Coordinator not available.");
                 }
@@ -160,17 +148,24 @@ impl RequestHandler for Balancer {
 
             // Handle the request for getting the list of servers
             RequestKind::GetServers => {
-                let server_ids = self.server_ids.read().unwrap();
-                rq.respond_with_server_list(server_ids.as_slice());
+                if let Some(coordinator) = &self.coordinator {
+                    let (response_tx, response_rx) = mpsc::channel();
+                    coordinator
+                        .get_message_tx()
+                        .send(CoordinatorMessage::GetServers(response_tx))
+                        .unwrap();
+                    let server_ids = response_rx.recv().unwrap();
+                    rq.respond_with_server_list(&server_ids);
+                } else {
+                    rq.respond_with_err("Coordinator not available.");
+                }
             }
 
             // Default case for handling all other requests
             _ => {
-                // Determine the server ID to handle this request.
                 let customer_id = rq.customer_id();
                 let server_id = self.assign_server(customer_id);
 
-                // Forward the request to the assigned server.
                 if let Some(coordinator) = &self.coordinator {
                     if let Some(server) = coordinator.get_server(server_id) {
                         server.read().unwrap().handle_request(rq);

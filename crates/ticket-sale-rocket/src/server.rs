@@ -186,22 +186,8 @@ impl Server {
                                 entry.insert(Reservation::new(ticket));
                                 rq.respond_with_int(ticket);
                             } else {
-                                // No tickets left to reserve; check the database for more.
-                                let mut db = self.database.write().unwrap();
-                                let additional_tickets = db.allocate(10); // Attempt to allocate more tickets
-
-                                if additional_tickets.is_empty() {
-                                    // No additional tickets were allocated; notify that sold out.
-                                    rq.respond_with_sold_out();
-                                } else {
-                                    // Add the newly allocated tickets to the server's queue.
-                                    available_tickets.extend(additional_tickets);
-                                    // Try reserving a ticket again.
-                                    if let Some(ticket) = available_tickets.pop_front() {
-                                        entry.insert(Reservation::new(ticket));
-                                        rq.respond_with_int(ticket);
-                                    }
-                                }
+                                // No tickets left to reserve; return sold out.
+                                rq.respond_with_sold_out();
                             }
                         }
                     }
@@ -225,6 +211,13 @@ impl Server {
                             // Complete the purchase and remove the reservation.
                             reservations.remove(&customer_id);
                             rq.respond_with_int(ticket_id);
+
+                            // Allocate a new ticket from the database to replace the sold one.
+                            let mut db = self.database.write().unwrap();
+                            if let Some(new_ticket) = db.allocate(1).pop() {
+                                let mut available_tickets = self.available_tickets.lock().unwrap();
+                                available_tickets.push_back(new_ticket);
+                            }
                         }
                     } else {
                         // No reservation found for the customer.

@@ -1,6 +1,7 @@
 //! Testing infrastructure
 
 #![warn(missing_docs)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use eyre::{eyre, Result};
 use project_settings::ProjectSettings;

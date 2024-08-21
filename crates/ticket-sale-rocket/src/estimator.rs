@@ -77,11 +77,13 @@ impl Estimator {
                 let servers = coordinator.get_servers();
                 let num_servers = servers.len() as u32;
 
+                // If no servers are available, sleep for a short time and continue
                 if num_servers == 0 {
                     std::thread::sleep(Duration::from_secs(1));
                     continue;
                 }
 
+                // Query the database for the number of available tickets
                 let db_available = {
                     let db = database.read().unwrap();
                     db.get_num_available()

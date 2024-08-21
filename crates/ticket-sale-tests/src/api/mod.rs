@@ -1,6 +1,6 @@
 use std::{str::FromStr, sync::Arc};
 
-use eyre::Result;
+use eyre::{eyre, Result};
 use flume::Sender;
 use nanorand::Rng;
 use thiserror::Error;
@@ -158,7 +158,12 @@ impl Api {
             response_channel: sender,
         };
         self.my_channel.send_async(msg).await?;
-        Ok(receiver.await?)
+        receiver.await.map_err(|_| {
+            eyre!(
+                "Unanswered {kind:?} request, message body: {payload:?}, customer: {:?} server: {:?}",
+                options.customer_id.unwrap_or_default(), options.server_id
+            )
+        })
     }
 
     /// Get the number of active (i.e., non-terminating) servers

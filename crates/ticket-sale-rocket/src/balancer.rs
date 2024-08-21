@@ -99,7 +99,6 @@ impl Balancer {
         }
 
         customer_server_map.insert(customer_id, server_id);
-        println!("Assigned server {} to customer {}", server_id, customer_id);
 
         Some(server_id)
     }

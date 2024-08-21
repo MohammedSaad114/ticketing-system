@@ -14,6 +14,13 @@ use crate::database::Database;
 use crate::messages::{CoordinatorMessage, ServerMessage, ServerOrRequestMessage};
 use crate::server::Server;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    Running,
+    Terminating,
+    HasStopped,
+}
+
 /// Coordinator manages the servers and the database, handling server scaling and request
 /// routing.
 type ServerMap = Arc<RwLock<HashMap<Uuid, (Sender<ServerOrRequestMessage>, JoinHandle<()>)>>>;
@@ -136,7 +143,7 @@ impl Coordinator {
                     if let Some((sender, handle)) = servers.remove(server_id) {
                         sender
                             .send(ServerOrRequestMessage::ServerMessage(
-                                ServerMessage::ShutdownServer,
+                                ServerMessage::TerminateServer,
                             ))
                             .unwrap_or_else(|e| {
                                 eprintln!(

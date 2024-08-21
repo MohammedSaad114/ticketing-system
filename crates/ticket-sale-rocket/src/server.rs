@@ -162,19 +162,6 @@ impl Server {
         self.id
     }
 
-    /// Abort and remove expired reservations.
-    fn clear_expired_reservations(&mut self) {
-        let mut reservations = self.reservations.lock().unwrap();
-        reservations.retain(|_, res| {
-            if res.age_secs() > self.reservation_timeout.as_secs() {
-                self.available_tickets.lock().unwrap().push_back(res.ticket);
-                false
-            } else {
-                true
-            }
-        });
-    }
-
     /// Handles incoming requests by dispatching them to the appropriate handler based on
     /// the request type.
     pub fn handle_request(&mut self, mut rq: Request) {

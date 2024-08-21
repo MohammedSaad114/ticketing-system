@@ -3,14 +3,16 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use ticket_sale_core::Request;
 use uuid::Uuid;
 
+use crate::coordinator::ServerState;
+
 // Define the enum for messages that will be passed between the Balancer and Coordinator.
 pub enum CoordinatorMessage {
     GetNumServers(Sender<u32>),
     SetNumServers(usize, Sender<u32>),
     GetServers(Sender<Vec<Uuid>>),
-    ServerUpdate(Uuid, u32),
     IsServerTerminating(Uuid, Sender<bool>),
     GetServerSender(Uuid, Sender<Sender<ServerOrRequestMessage>>),
+    ServerUpdate(Uuid, u32),
     Shutdown,
 }
 
@@ -18,6 +20,7 @@ pub enum Message<T> {
     HighPriority(T),
     NormalPriority(T),
 }
+#[derive(Debug)]
 
 pub enum ServerOrRequestMessage {
     ServerMessage(ServerMessage),
@@ -25,12 +28,13 @@ pub enum ServerOrRequestMessage {
 }
 
 // Define the enum for messages that the server can receive
+#[derive(Debug, Clone)]
 pub enum ServerMessage {
     ShutdownServer,  // Immediate shutdown
     TerminateServer, // Graceful termination
     UpdateTicketEstimate(u32),
     RequestTicketCount(Sender<u32>),
-    HasStopped(Sender<bool>),
+    CurrentState(Sender<ServerState>),
 }
 
 pub struct MessageQueue {

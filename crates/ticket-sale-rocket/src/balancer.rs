@@ -70,8 +70,9 @@ impl Balancer {
     ///
     /// # Returns
     ///
-    /// * `Option<Uuid>` - The ID of the assigned server.
+    /// * `Uuid` - The ID of the assigned server.
     fn assign_server(&self, customer_id: Uuid) -> Option<Uuid> {
+        // Acquire a write lock on the customer-to-server map.
         let mut customer_server_map = self.customer_server_map.write().unwrap();
 
         if let Some(&server_id) = customer_server_map.get(&customer_id) {
@@ -117,6 +118,7 @@ impl RequestHandler for Balancer {
             return;
         }
 
+        // Check if the balancer is terminating.
         if self.terminating.load(Ordering::SeqCst) {
             rq.respond_with_err("Balancer is terminating.");
             return;
@@ -169,6 +171,7 @@ impl RequestHandler for Balancer {
                 }
             }
 
+            // Handle all other request types
             _ => {
                 let customer_id = rq.customer_id();
                 if let Some(server_id) = self.assign_server(customer_id) {

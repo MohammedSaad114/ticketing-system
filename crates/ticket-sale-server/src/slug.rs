@@ -83,6 +83,9 @@ impl ServerInner {
 
             // Handling the following requests will remain the Server's responsibility.
             RequestKind::NumAvailableTickets => {
+                // This request requires us to respond with a server id
+                rq.set_server_id(self.id);
+
                 rq.respond_with_int(self.available_tickets.len() as u32)
             }
             RequestKind::ReserveTicket => {

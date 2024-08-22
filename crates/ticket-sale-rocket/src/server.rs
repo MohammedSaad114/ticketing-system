@@ -1,4 +1,5 @@
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::sync::mpsc::Sender;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, RwLock,
@@ -9,6 +10,7 @@ use ticket_sale_core::{Request, RequestKind};
 use uuid::Uuid;
 
 use super::database::Database;
+use super::messages::CoordinatorMessage; // Assuming CoordinatorMessage is defined in the coordinator module
 
 /// Represents a server that handles ticket sales.
 pub struct Server {
@@ -35,6 +37,15 @@ pub struct Server {
 
     /// Flag indicating whether the server is currently terminating.
     pub terminating: AtomicBool,
+
+    /// Flag indicating whether the server is currently in the process of stopping.
+    is_stopping: AtomicBool, // Added flag
+
+    /// Flag indicating whether the server has fully stopped.
+    has_stopped: AtomicBool, // Added flag
+
+    /// Channel to send messages to the Coordinator.
+    coordinator_channel: Sender<CoordinatorMessage>, // Added for messaging
 }
 
 /// Represents a ticket reservation.
@@ -84,6 +95,7 @@ impl Server {
     /// * `database` - Shared database instance.
     /// * `ticket_count` - Number of tickets to allocate to this server.
     /// * `reservation_timeout` - Timeout duration for reservations in seconds.
+    /// * `coordinator_channel` - Channel to send messages to the coordinator.
     ///
     /// # Returns
     ///
@@ -92,6 +104,7 @@ impl Server {
         database: Arc<RwLock<Database>>,
         ticket_count: u32,
         reservation_timeout: u32,
+        coordinator_channel: Sender<CoordinatorMessage>,
     ) -> Self {
         let id = Uuid::new_v4();
         let available_tickets = {
@@ -110,6 +123,9 @@ impl Server {
             last_estimate: Mutex::new(0),
             running: AtomicBool::new(true),
             terminating: AtomicBool::new(false),
+            is_stopping: AtomicBool::new(false), // Initialize the flag
+            has_stopped: AtomicBool::new(false), // Initialize the flag
+            coordinator_channel,                 // Set up the coordinator channel
         }
     }
 
@@ -138,6 +154,12 @@ impl Server {
     ///
     /// * `rq` - The request to handle.
     pub fn handle_request(&mut self, mut rq: Request) {
+        // Check if the server is currently stopping.
+        if self.is_stopping.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is stopping.");
+            return;
+        }
+
         // Check if the server is currently terminating.
         if self.terminating.load(Ordering::SeqCst) {
             rq.respond_with_err("Server is terminating.");
@@ -304,6 +326,14 @@ impl Server {
         }
 
         println!("Server {} has been fully shut down", self.id);
+
+        // Mark the server as fully stopped.
+        self.has_stopped.store(true, Ordering::SeqCst);
+
+        // Notify the Coordinator about the shutdown.
+        let _ = self
+            .coordinator_channel
+            .send(CoordinatorMessage::ServerUpdate(self.id, 0));
     }
 
     /// Mark the server for termination, ensuring no new requests are processed
@@ -334,5 +364,20 @@ impl Server {
         db.deallocate(&remaining_tickets);
 
         println!("Server {} has been fully terminated", self.id);
+
+        // Notify the Coordinator about the termination.
+        let _ = self
+            .coordinator_channel
+            .send(CoordinatorMessage::ServerUpdate(self.id, 0));
+    }
+
+    /// Initiates the stopping process for the server.
+    pub fn stop(&self) {
+        // Mark the server as stopping.
+        self.is_stopping.store(true, Ordering::SeqCst);
+        println!("Server {} is stopping", self.id);
+
+        // Proceed to shutdown the server.
+        self.shutdown();
     }
 }

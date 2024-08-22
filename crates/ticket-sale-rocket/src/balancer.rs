@@ -55,6 +55,15 @@ impl Balancer {
         }
     }
 
+    /// Set the Estimator's JoinHandle.
+    ///
+    /// # Arguments
+    ///
+    /// * `handle` - JoinHandle for the Estimator thread.
+    ///
+    /// # Returns
+    ///
+    /// * `Self` - The `Balancer` instance with the estimator handle set.
     pub fn set_estimator_handle(mut self, handle: JoinHandle<()>) -> Self {
         self.estimator_handle = Some(handle);
         self
@@ -69,7 +78,8 @@ impl Balancer {
     ///
     /// # Returns
     ///
-    /// * `Uuid` - The ID of the assigned server.
+    /// * `Option<Uuid>` - The ID of the assigned server, or None if no server is
+    ///   available.
     fn assign_server(&self, customer_id: Uuid) -> Option<Uuid> {
         // Acquire a write lock on the customer-to-server map.
         let mut customer_server_map = self.customer_server_map.write().unwrap();
@@ -127,6 +137,16 @@ impl Balancer {
 
         // Return the assigned server ID.
         Some(server_id)
+    }
+
+    /// Notify the coordinator to shut down servers and clean up.
+    fn initiate_shutdown(&self) {
+        if let Some(coordinator) = &self.coordinator {
+            coordinator
+                .get_message_tx()
+                .send(CoordinatorMessage::Shutdown)
+                .unwrap();
+        }
     }
 }
 
@@ -216,14 +236,13 @@ impl RequestHandler for Balancer {
         }
     }
 
-    /// Shut down the balancer
+    /// Shut down the balancer and notify the coordinator
     fn shutdown(self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         println!("Balancer is shutting down");
 
-        if let Some(coordinator) = self.coordinator {
-            coordinator.shutdown();
-        }
+        // Notify the coordinator to shut down all servers
+        self.initiate_shutdown();
 
         if let Some(handle) = self.estimator_handle {
             handle.join().unwrap();

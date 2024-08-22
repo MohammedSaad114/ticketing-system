@@ -53,7 +53,7 @@ impl Coordinator {
     ) -> Self {
         let mut servers = HashMap::new();
         for _ in 0..config.initial_servers {
-            let server = Self::spawn_server(database.clone(), config.timeout);
+            let server = Self::spawn_server(database.clone(), config.timeout, message_tx.clone());
             let server_id = server.read().unwrap().id();
             servers.insert(server_id, server);
         }
@@ -80,11 +80,13 @@ impl Coordinator {
     fn spawn_server(
         database: Arc<RwLock<Database>>,
         reservation_timeout: u32,
+        message_tx: Sender<CoordinatorMessage>, // Add message_tx as a parameter
     ) -> Arc<RwLock<Server>> {
         let server = Arc::new(RwLock::new(Server::new(
             Arc::clone(&database),
             10,
             reservation_timeout,
+            message_tx.clone(), // Use the passed message_tx
         )));
         let server_clone = Arc::clone(&server);
 
@@ -108,8 +110,11 @@ impl Coordinator {
             // Increase the number of servers
             std::cmp::Ordering::Greater => {
                 for _ in servers.len()..num_servers {
-                    let server =
-                        Self::spawn_server(self.database.clone(), self.reservation_timeout);
+                    let server = Self::spawn_server(
+                        self.database.clone(),
+                        self.reservation_timeout,
+                        self.message_tx.clone(),
+                    );
                     let server_id = server.read().unwrap().id();
                     servers.insert(server_id, server);
                     // Notify the Balancer of the new server
@@ -123,12 +128,8 @@ impl Coordinator {
                 let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
                 for server_id in server_ids.iter().skip(num_servers) {
                     if let Some(server) = servers.remove(server_id) {
-                        server.write().unwrap().shutdown();
-                        println!("Server {} removed", server_id);
-                        // Notify the Balancer of the removed server
-                        self.message_tx
-                            .send(CoordinatorMessage::ServerUpdate(*server_id, 1))
-                            .unwrap();
+                        server.write().unwrap().stop(); // Trigger stop process
+                        println!("Server {} stopped", server_id);
                     }
                 }
             }
@@ -202,6 +203,10 @@ impl Coordinator {
                     self.shutdown();
                     break;
                 }
+                CoordinatorMessage::StopRequest => {
+                    self.stop();
+                    break;
+                }
             }
         }
     }
@@ -223,5 +228,19 @@ impl Coordinator {
         }
 
         println!("Coordinator has been fully shut down");
+    }
+
+    /// Stops the Coordinator and all managed servers immediately.
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+        println!("Coordinator is stopping");
+
+        let servers = self.servers.read().unwrap();
+        for (server_id, server) in servers.iter() {
+            println!("Stopping server {}", server_id);
+            server.write().unwrap().stop();
+        }
+
+        println!("Coordinator has been fully stopped");
     }
 }

@@ -12,20 +12,22 @@ pub enum CoordinatorMessage {
     GetServers(Sender<Vec<Uuid>>),
     GetServerSender(Uuid, Sender<Sender<ServerOrRequestMessage>>),
     Shutdown,
+    ServerTerminated(Uuid),
 }
 
+// Define the enum for messages with different priorities.
 pub enum Message<T> {
     HighPriority(T),
     NormalPriority(T),
 }
-#[derive(Debug)]
 
+#[derive(Debug)]
 pub enum ServerOrRequestMessage {
     ServerMessage(ServerMessage),
     ClientRequest(Request),
 }
 
-// Define the enum for messages that the server can receive
+// Define the enum for messages that the server can receive.
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
     ShutdownServer,  // Immediate shutdown

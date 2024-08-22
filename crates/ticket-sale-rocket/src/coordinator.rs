@@ -6,6 +6,7 @@ use std::sync::{
     Arc, RwLock,
 };
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use ticket_sale_core::Config;
 use uuid::Uuid;
@@ -159,10 +160,17 @@ impl Coordinator {
                         sender
                             .send(ServerOrRequestMessage::ServerMessage(
                                 ServerMessage::TerminateServer,
+                            ))
+                            .unwrap_or_else(|e| {
+                                eprintln!(
+                                    "Failed to send shutdown message to server {}: {}",
+                                    server_id, e
                                 );
                             });
                     }
                 }
+                // Clean up terminated servers after adjusting the number of servers
+                self.cleanup_terminated_servers();
             }
 
             _ => {}
@@ -219,7 +227,9 @@ impl Coordinator {
     /// Handles incoming messages and updates the coordinator state accordingly.
     pub fn run(&self, rx: Receiver<CoordinatorMessage>) {
         while self.running.load(Ordering::SeqCst) {
-            if let Ok(message) = rx.recv() {
+            // Now process the incoming messages
+            if let Ok(message) = rx.recv_timeout(Duration::from_millis(100)) {
+                // Add a small timeout to avoid blocking indefinitely
                 match message {
                     CoordinatorMessage::GetNumServers(sender) => {
                         let num_servers = self.get_running_servers().len() as u32;
@@ -253,7 +263,6 @@ impl Coordinator {
                     }
                 }
             } else {
-                eprintln!("Coordinator failed to receive message.");
             }
         }
     }

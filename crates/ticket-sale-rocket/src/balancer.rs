@@ -74,6 +74,7 @@ impl Balancer {
     fn assign_server(&self, customer_id: Uuid) -> Option<Uuid> {
         // Acquire a write lock on the customer-to-server map.
         let mut customer_server_map = self.customer_server_map.write().unwrap();
+
         if let Some(&server_id) = customer_server_map.get(&customer_id) {
             return Some(server_id);
         }
@@ -88,14 +89,17 @@ impl Balancer {
         let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
         let server_id = server_ids[index];
 
-        for &id in &server_ids {
-            if id != server_id && !self.coordinator.as_ref()?.is_server_terminating(id) {
-                customer_server_map.insert(customer_id, id);
-                return Some(id);
+        if self.coordinator.as_ref()?.is_server_terminating(server_id) {
+            for &id in &server_ids {
+                if id != server_id && !self.coordinator.as_ref()?.is_server_terminating(id) {
+                    customer_server_map.insert(customer_id, id);
+                    return Some(id);
+                }
             }
+            return None;
         }
+
         customer_server_map.insert(customer_id, server_id);
-        println!("Assigned {} to {}", customer_id, server_id);
 
         Some(server_id)
     }

@@ -10,7 +10,9 @@ pub enum CoordinatorMessage {
     GetNumServers(Sender<u32>),
     SetNumServers(usize, Sender<u32>),
     GetServers(Sender<Vec<Uuid>>),
+    IsServerTerminating(Uuid, Sender<bool>),
     GetServerSender(Uuid, Sender<Sender<ServerOrRequestMessage>>),
+    ServerUpdate(Uuid, u32),
     Shutdown,
 }
 

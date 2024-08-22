@@ -6,6 +6,7 @@ use std::sync::{
     Arc, RwLock,
 };
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use ticket_sale_core::Config;
 use uuid::Uuid;
@@ -153,8 +154,8 @@ impl Coordinator {
                 // Iterate over the server IDs that need to be terminated, starting from
                 // `num_servers`.
                 for server_id in server_ids.iter().skip(num_servers) {
-                    // Remove the server from the map and retrieve its components: sender, state,
-                    // and handle.
+                    // Retrieve the server's components: sender, state, and handle, without removing
+                    // from map.
                     if let Some((sender, server_state, handle)) = servers.remove(server_id) {
                         // Set the server's state to `Terminating` to indicate that it is shutting
                         // down.
@@ -178,9 +179,11 @@ impl Coordinator {
 
                         // Record the handle of the terminating server to keep track of it.
                         let mut terminating_handles = self.terminating_handles.write().unwrap();
-                        terminating_handles.push((*server_id, Some(handle)));
+                        terminating_handles.push((*server_id, Some(handle))); // Move the handle
                     }
                 }
+                // Clean up terminated servers after adjusting the number of servers
+                self.cleanup_terminated_servers();
             }
 
             _ => {}
@@ -230,17 +233,17 @@ impl Coordinator {
     /// Handles incoming messages and updates the coordinator state accordingly.
     pub fn run(&self, rx: Receiver<CoordinatorMessage>) {
         while self.running.load(Ordering::SeqCst) {
-            if let Ok(message) = rx.recv() {
+            // Now process the incoming messages
+            if let Ok(message) = rx.recv_timeout(Duration::from_millis(100)) {
+                // Add a small timeout to avoid blocking indefinitely
                 match message {
                     CoordinatorMessage::GetNumServers(sender) => {
-                        self.cleanup_terminated_servers();
                         let num_servers = self.get_running_servers().len() as u32;
                         sender.send(num_servers).unwrap_or_else(|e| {
                             eprintln!("Failed to send number of servers: {}", e)
                         });
                     }
                     CoordinatorMessage::SetNumServers(num, sender) => {
-                        self.cleanup_terminated_servers();
                         self.set_num_servers(num);
                         let actual_num_servers = self.get_running_servers().len() as u32;
                         sender.send(actual_num_servers).unwrap_or_else(|e| {
@@ -248,14 +251,12 @@ impl Coordinator {
                         });
                     }
                     CoordinatorMessage::GetServers(sender) => {
-                        self.cleanup_terminated_servers();
                         let server_ids = self.get_running_servers();
                         sender
                             .send(server_ids)
                             .unwrap_or_else(|e| eprintln!("Failed to send server list: {}", e));
                     }
                     CoordinatorMessage::GetServerSender(server_id, sender) => {
-                        self.cleanup_terminated_servers();
                         if let Some(server_sender) = self.get_server_sender(server_id) {
                             sender.send(server_sender).unwrap_or_else(|e| {
                                 eprintln!("Failed to send server sender: {}", e)
@@ -263,42 +264,31 @@ impl Coordinator {
                         }
                     }
                     CoordinatorMessage::Shutdown => {
-                        self.cleanup_terminated_servers();
                         self.shutdown();
                         break;
                     }
                 }
             } else {
-                eprintln!("Coordinator failed to receive message.");
             }
         }
     }
 
     fn cleanup_terminated_servers(&self) {
-        let mut terminating_handles = self.terminating_handles.write().unwrap();
         let mut servers = self.servers.write().unwrap();
+        let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
 
-        terminating_handles.retain_mut(|(server_id, handle_option)| {
-            if let Some(handle) = handle_option.take() {
-                // Check if the server state is `HasStopped`
-                if let Some((_, server_state, _)) = servers.get(server_id) {
-                    if *server_state.lock().unwrap() == ServerState::HasStopped {
-                        // If the server has stopped, join its handle
-                        handle.join().unwrap();
-
-                        // Remove the server from the `servers` map
-                        servers.remove(server_id);
-
-                        println!("Server {} has fully terminated and removed.", server_id);
-                        return false; // Remove from terminating_handles
-                    } else {
-                        // If the server has not stopped, put the handle back
-                        *handle_option = Some(handle);
-                    }
+        for server_id in server_ids {
+            if let Some((_, server_state, _)) = servers.get(&server_id) {
+                if *server_state.lock().unwrap() == ServerState::HasStopped {
+                    // If the server has stopped, remove it from the servers map
+                    servers.remove(&server_id);
+                    println!(
+                        "Server {} has fully terminated and been removed.",
+                        server_id
+                    );
                 }
             }
-            true // Keep in terminating_handles
-        });
+        }
     }
 
     /// Checks if the server with the given ID is terminating.

@@ -10,7 +10,7 @@ use ticket_sale_core::{Request, RequestHandler, RequestKind};
 use uuid::Uuid;
 
 use crate::coordinator::Coordinator;
-use crate::messages::{CoordinatorMessage, ServerOrRequestMessage};
+use crate::messages::{CoordinatorMessage, ServerMessage, ServerOrRequestMessage};
 
 /// Implementation of the load balancer
 pub struct Balancer {
@@ -56,6 +56,9 @@ impl Balancer {
     }
 
     /// Sets the Estimator's JoinHandle for the balancer.
+    ///
+    /// This allows the balancer to wait for the Estimator thread to finish during
+    /// shutdown.
     pub fn set_estimator_handle(mut self, handle: JoinHandle<()>) -> Self {
         self.estimator_handle = Some(handle);
         self
@@ -75,37 +78,28 @@ impl Balancer {
         // Acquire a write lock on the customer-to-server map.
         let mut customer_server_map = self.customer_server_map.write().unwrap();
 
-        // If the customer is already mapped to a server, check if that server is terminating
+        // If the customer is already mapped to a server, return the server ID.
         if let Some(&server_id) = customer_server_map.get(&customer_id) {
-            if !self.coordinator.as_ref()?.is_server_terminating(server_id) {
-                return Some(server_id);
-            } else {
-                // If the server is terminating, remove it from the map
-                customer_server_map.remove(&customer_id);
-            }
+            return Some(server_id);
         }
 
+        // Retrieve the list of server IDs from the coordinator.
         let server_ids = self.coordinator.as_ref()?.get_servers();
 
         if server_ids.is_empty() {
             return None;
         }
 
+        // Perform round-robin assignment.
         let server_count = server_ids.len();
-        let mut index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
+        let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
+        let server_id = server_ids[index];
 
-        // Iterate through available servers until a non-terminating one is found
-        for _ in 0..server_count {
-            let server_id = server_ids[index];
-            if !self.coordinator.as_ref()?.is_server_terminating(server_id) {
-                customer_server_map.insert(customer_id, server_id);
-                return Some(server_id);
-            }
-            index = (index + 1) % server_count;
-        }
+        // Map the customer to the selected server.
+        customer_server_map.insert(customer_id, server_id);
 
-        // If all servers are terminating, return None
-        None
+        // Return the selected server ID.
+        Some(server_id)
     }
 }
 
@@ -116,6 +110,7 @@ impl RequestHandler for Balancer {
     ///
     /// * `rq` - The `Request` to be handled
     fn handle(&self, mut rq: Request) {
+        // Check if the balancer is shutting down.
         if self.shutting_down.load(Ordering::SeqCst) {
             rq.respond_with_err("Balancer is shutting down.");
             return;
@@ -174,7 +169,66 @@ impl RequestHandler for Balancer {
                 }
             }
 
-            // Handle all other request types
+            RequestKind::ReserveTicket => {
+                // Handle reservation requests with server termination checks
+                let customer_id = rq.customer_id();
+
+                // Assign a server to the customer, considering potential server termination.
+                if let Some(server_id) = self.assign_server(customer_id) {
+                    if let Some(coordinator) = &self.coordinator {
+                        if let Some(server_sender) = coordinator.get_server_sender(server_id) {
+                            // Check if the server is terminating before sending the request.
+                            let (response_tx, response_rx) = mpsc::channel();
+                            server_sender
+                                .send(ServerOrRequestMessage::ServerMessage(
+                                    ServerMessage::CheckIfTerminating(response_tx),
+                                ))
+                                .unwrap();
+
+                            if let Ok(is_terminating) = response_rx.recv() {
+                                if is_terminating {
+                                    // Server is terminating, remove the current mapping.
+                                    println!(
+                                        "Server {} is terminating. Reassigning request from customer {}.",
+                                        server_id, customer_id
+                                    );
+                                    self.customer_server_map
+                                        .write()
+                                        .unwrap()
+                                        .remove(&customer_id);
+
+                                    // Reassign to another server.
+                                    if let Some(new_server_id) = self.assign_server(customer_id) {
+                                        if let Some(new_server_sender) =
+                                            coordinator.get_server_sender(new_server_id)
+                                        {
+                                            // Send the request to the newly assigned server.
+                                            new_server_sender
+                                                .send(ServerOrRequestMessage::ClientRequest(rq))
+                                                .unwrap();
+                                        } else {
+                                            rq.respond_with_err("No available servers.");
+                                        }
+                                    } else {
+                                        rq.respond_with_err("No available servers.");
+                                    }
+                                } else {
+                                    // Server is not terminating, proceed to send the request.
+                                    server_sender
+                                        .send(ServerOrRequestMessage::ClientRequest(rq))
+                                        .unwrap();
+                                }
+                            } else {
+                                rq.respond_with_err("Failed to check server state.");
+                            }
+                        }
+                    }
+                } else {
+                    rq.respond_with_err("No available servers.");
+                }
+            }
+
+            // Handle all other request types normally
             _ => {
                 let customer_id = rq.customer_id();
                 if let Some(server_id) = self.assign_server(customer_id) {
@@ -197,6 +251,9 @@ impl RequestHandler for Balancer {
     }
 
     /// Shut down the balancer
+    ///
+    /// This method ensures that the balancer is shut down gracefully, ensuring
+    /// that any associated threads (like the Estimator) are properly joined.
     fn shutdown(self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         println!("Balancer is shutting down");

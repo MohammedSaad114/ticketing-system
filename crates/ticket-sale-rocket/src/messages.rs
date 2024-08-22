@@ -5,17 +5,15 @@ use uuid::Uuid;
 
 use crate::coordinator::ServerState;
 
-// Define the enum for messages that will be passed between the Balancer and Coordinator.
+/// Define the enum for messages that will be passed between the Balancer and Coordinator.
 pub enum CoordinatorMessage {
     GetNumServers(Sender<u32>),
     SetNumServers(usize, Sender<u32>),
     GetServers(Sender<Vec<Uuid>>),
     GetServerSender(Uuid, Sender<Sender<ServerOrRequestMessage>>),
     Shutdown,
-    ServerTerminated(Uuid),
 }
 
-// Define the enum for messages with different priorities.
 pub enum Message<T> {
     HighPriority(T),
     NormalPriority(T),
@@ -27,7 +25,7 @@ pub enum ServerOrRequestMessage {
     ClientRequest(Request),
 }
 
-// Define the enum for messages that the server can receive.
+/// Define the enum for messages that the server can receive.
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
     ShutdownServer,  // Immediate shutdown
@@ -35,6 +33,8 @@ pub enum ServerMessage {
     UpdateTicketEstimate(u32),
     RequestTicketCount(Sender<u32>),
     CurrentState(Sender<ServerState>),
+    /// New variant to check if the server is terminating.
+    CheckIfTerminating(Sender<bool>),
 }
 
 pub struct MessageQueue {
@@ -57,14 +57,17 @@ impl MessageQueue {
         }
     }
 
+    /// Sends a high-priority message to the server.
     pub fn send_high_priority(&self, msg: ServerOrRequestMessage) {
         self.high_priority_tx.send(msg).unwrap();
     }
 
+    /// Sends a normal-priority message to the server.
     pub fn send_normal_priority(&self, msg: ServerOrRequestMessage) {
         self.normal_priority_tx.send(msg).unwrap();
     }
 
+    /// Receives messages, prioritizing high-priority messages.
     pub fn receive(&self) -> Option<Message<ServerOrRequestMessage>> {
         // Try to receive from high-priority first
         if let Ok(msg) = self.high_priority_rx.try_recv() {

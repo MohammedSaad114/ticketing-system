@@ -6,7 +6,6 @@ use std::sync::{
     Arc, RwLock,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use ticket_sale_core::Config;
 use uuid::Uuid;
@@ -22,6 +21,8 @@ pub enum ServerState {
     HasStopped,
 }
 
+/// Coordinator manages the servers and the database, handling server scaling and request
+/// routing.
 type ServerMap = Arc<
     RwLock<
         HashMap<
@@ -29,7 +30,7 @@ type ServerMap = Arc<
             (
                 Sender<ServerOrRequestMessage>,
                 Arc<Mutex<ServerState>>,
-                Option<JoinHandle<()>>,
+                JoinHandle<()>,
             ),
         >,
     >,
@@ -55,8 +56,9 @@ impl Coordinator {
         let mut servers = HashMap::new();
         for _ in 0..config.initial_servers {
             let (server, sender, server_state, handle) =
-                Self::spawn_server(database.clone(), config.timeout, message_tx.clone());
-            servers.insert(server.read().unwrap().id(), (sender, server_state, handle));
+                Self::spawn_server(database.clone(), config.timeout);
+            let server_id = server.read().unwrap().id();
+            servers.insert(server_id, (sender, server_state, handle));
         }
 
         Self {
@@ -72,26 +74,22 @@ impl Coordinator {
     fn spawn_server(
         database: Arc<RwLock<Database>>,
         reservation_timeout: u32,
-        coordinator_tx: Sender<CoordinatorMessage>,
     ) -> (
         Arc<RwLock<Server>>,
         Sender<ServerOrRequestMessage>,
         Arc<Mutex<ServerState>>,
-        Option<JoinHandle<()>>,
+        JoinHandle<()>,
     ) {
         let (tx, rx) = mpsc::channel();
         let rx = Arc::new(Mutex::new(rx));
         let server_state = Arc::new(Mutex::new(ServerState::Running));
 
-        let cloned_tx = tx.clone();
         let server: Arc<RwLock<Server>> = Arc::new(RwLock::new(Server::new(
             database,
-            coordinator_tx,
             5,
             reservation_timeout,
             rx,
             server_state.clone(),
-            cloned_tx,
         )));
 
         let server_clone = Arc::clone(&server);
@@ -100,7 +98,7 @@ impl Coordinator {
             server.run();
         });
 
-        (server, tx, server_state, Some(handle))
+        (server, tx, server_state, handle)
     }
 
     pub fn set_num_servers(&self, num_servers: usize) {
@@ -109,11 +107,8 @@ impl Coordinator {
         match num_servers.cmp(&servers.len()) {
             std::cmp::Ordering::Greater => {
                 for _ in servers.len()..num_servers {
-                    let (server, sender, server_state, handle) = Self::spawn_server(
-                        self.database.clone(),
-                        self.reservation_timeout,
-                        self.message_tx.clone(),
-                    );
+                    let (server, sender, server_state, handle) =
+                        Self::spawn_server(self.database.clone(), self.reservation_timeout);
                     servers.insert(server.read().unwrap().id(), (sender, server_state, handle));
                 }
             }
@@ -132,13 +127,13 @@ impl Coordinator {
                             ))
                             .unwrap_or_else(|e| {
                                 eprintln!(
-                                    "Failed to send termination message to server {}: {}",
+                                    "Failed to send shutdown message to server {}: {}",
                                     server_id, e
                                 );
                             });
 
                         let mut terminating_handles = self.terminating_handles.write().unwrap();
-                        terminating_handles.push((*server_id, handle));
+                        terminating_handles.push((*server_id, Some(handle)));
                     }
                 }
             }
@@ -175,15 +170,17 @@ impl Coordinator {
 
     pub fn run(&self, rx: Receiver<CoordinatorMessage>) {
         while self.running.load(Ordering::SeqCst) {
-            if let Ok(message) = rx.recv_timeout(Duration::from_millis(100)) {
+            if let Ok(message) = rx.recv() {
                 match message {
                     CoordinatorMessage::GetNumServers(sender) => {
+                        self.cleanup_terminated_servers();
                         let num_servers = self.get_running_servers().len() as u32;
                         sender.send(num_servers).unwrap_or_else(|e| {
                             eprintln!("Failed to send number of servers: {}", e)
                         });
                     }
                     CoordinatorMessage::SetNumServers(num, sender) => {
+                        self.cleanup_terminated_servers();
                         self.set_num_servers(num);
                         let actual_num_servers = self.get_running_servers().len() as u32;
                         sender.send(actual_num_servers).unwrap_or_else(|e| {
@@ -191,12 +188,14 @@ impl Coordinator {
                         });
                     }
                     CoordinatorMessage::GetServers(sender) => {
+                        self.cleanup_terminated_servers();
                         let server_ids = self.get_running_servers();
                         sender
                             .send(server_ids)
                             .unwrap_or_else(|e| eprintln!("Failed to send server list: {}", e));
                     }
                     CoordinatorMessage::GetServerSender(server_id, sender) => {
+                        self.cleanup_terminated_servers();
                         if let Some(server_sender) = self.get_server_sender(server_id) {
                             sender.send(server_sender).unwrap_or_else(|e| {
                                 eprintln!("Failed to send server sender: {}", e)
@@ -204,47 +203,37 @@ impl Coordinator {
                         }
                     }
                     CoordinatorMessage::Shutdown => {
+                        self.cleanup_terminated_servers();
                         self.shutdown();
                         break;
                     }
-                    CoordinatorMessage::ServerTerminated(server_id) => {
-                        // Remove the server from the list
-                        let mut servers = self.servers.write().unwrap();
-                        if let Some((_, _, handle)) = servers.remove(&server_id) {
-                            println!("Server {} has terminated and been removed.", server_id);
-
-                            // Join the handle if it exists
-                            if let Some(handle) = handle {
-                                handle.join().unwrap_or_else(|e| {
-                                    eprintln!(
-                                        "Failed to join thread for server {}: {:?}",
-                                        server_id, e
-                                    );
-                                });
-                            }
-                        }
-                        self.cleanup_terminated_servers();
-                    }
                 }
+            } else {
+                eprintln!("Coordinator failed to receive message.");
             }
         }
     }
 
     fn cleanup_terminated_servers(&self) {
+        let mut terminating_handles = self.terminating_handles.write().unwrap();
         let mut servers = self.servers.write().unwrap();
-        let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
 
-        for server_id in server_ids {
-            if let Some((_, server_state, _)) = servers.get(&server_id) {
-                if *server_state.lock().unwrap() == ServerState::HasStopped {
-                    servers.remove(&server_id);
-                    println!(
-                        "Server {} has fully terminated and been removed.",
-                        server_id
-                    );
+        terminating_handles.retain_mut(|(server_id, handle_option)| {
+            if let Some(handle) = handle_option.take() {
+                if let Some((_, server_state, _)) = servers.get(server_id) {
+                    if *server_state.lock().unwrap() == ServerState::HasStopped {
+                        handle.join().unwrap();
+                        servers.remove(server_id);
+                        println!("Server {} has fully terminated and removed.", server_id);
+                        return false; // Remove from terminating_handles
+                    } else {
+                        *handle_option = Some(handle); // Put handle back if server not
+                                                       // stopped
+                    }
                 }
             }
-        }
+            true // Keep in terminating_handles if still terminating
+        });
     }
 
     pub fn is_server_terminating(&self, id: Uuid) -> bool {
@@ -260,7 +249,6 @@ impl Coordinator {
         println!("Coordinator is shutting down");
 
         let mut servers = self.servers.write().unwrap();
-
         for (server_id, (sender, _, handle)) in servers.drain() {
             println!("Sending shutdown message to Server {}", server_id);
             sender
@@ -273,11 +261,7 @@ impl Coordinator {
                         server_id, e
                     );
                 });
-            if let Some(handle) = handle {
-                handle.join().unwrap_or_else(|e| {
-                    eprintln!("Failed to join thread for server {}: {:?}", server_id, e);
-                });
-            }
+            handle.join().unwrap(); // Join the server thread after shutdown
             println!("Joined thread for Server {}", server_id);
         }
 

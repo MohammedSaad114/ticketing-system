@@ -1,7 +1,6 @@
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use ticket_sale_core::{Request, RequestKind};
@@ -9,20 +8,33 @@ use uuid::Uuid;
 
 use super::database::Database;
 use crate::coordinator::ServerState;
-use crate::messages::{CoordinatorMessage, ServerMessage, ServerOrRequestMessage};
+use crate::messages::{ServerMessage, ServerOrRequestMessage};
 
 /// Represents a server that handles ticket sales.
 pub struct Server {
+    /// Unique identifier for the server.
     id: Uuid,
-    coordinator_tx: Sender<CoordinatorMessage>,
+
+    /// Shared database instance.
     database: Arc<RwLock<Database>>,
+
+    /// Queue of available tickets managed by this server.
     available_tickets: Mutex<VecDeque<u32>>,
+
+    /// Map of customer reservations with reservation expiration timestamps.
     reservations: Mutex<HashMap<Uuid, Reservation>>,
+
+    /// Timeout duration for reservations.
     reservation_timeout: Duration,
+
+    /// Last estimate of available tickets received from the estimator.
     last_estimate: Mutex<u32>,
+
+    /// Prioritized channel for incoming requests.
     receiver: Arc<Mutex<Receiver<ServerOrRequestMessage>>>,
+
+    /// State of the server.
     server_state: Arc<Mutex<ServerState>>,
-    server_tx: Sender<ServerOrRequestMessage>,
 }
 
 /// Represents a ticket reservation.
@@ -32,6 +44,7 @@ struct Reservation {
 }
 
 impl Reservation {
+    /// Creates a new `Reservation` instance with the current timestamp.
     #[inline]
     fn new(ticket: u32) -> Self {
         Self {
@@ -40,23 +53,29 @@ impl Reservation {
         }
     }
 
+    /// Returns the age of the ticket.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - instance of the ticket.
+    ///
+    /// # Returns
+    ///
+    /// * `age` - in seconds.
     #[inline]
     fn age_secs(&self) -> u64 {
         self.timestamp.elapsed().as_secs()
     }
 }
 
-use std::sync::RwLock;
-
 impl Server {
+    /// Creates a new `Server` instance.
     pub fn new(
         database: Arc<RwLock<Database>>,
-        coordinator_tx: Sender<CoordinatorMessage>,
         ticket_count: u32,
         reservation_timeout: u32,
         receiver: Arc<Mutex<Receiver<ServerOrRequestMessage>>>,
         server_state: Arc<Mutex<ServerState>>,
-        server_tx: Sender<ServerOrRequestMessage>,
     ) -> Self {
         let id = Uuid::new_v4();
 
@@ -68,7 +87,6 @@ impl Server {
 
         Self {
             id,
-            coordinator_tx,
             database,
             available_tickets,
             reservations: Mutex::new(HashMap::new()),
@@ -76,7 +94,6 @@ impl Server {
             last_estimate: Mutex::new(0),
             receiver,
             server_state,
-            server_tx,
         }
     }
 
@@ -84,15 +101,21 @@ impl Server {
         self.handle_messages();
     }
 
-    fn handle_messages(&mut self) {
+    /// Handles incoming messages based on their priority.
+    pub fn handle_messages(&mut self) {
         loop {
+            // Check server state at the start of the loop
             let state = *self.server_state.lock().unwrap();
             if state != ServerState::Running {
                 break;
             }
 
-            let message = self.receive_message();
-            if let Some(message) = message {
+            let message = {
+                let receiver = self.receiver.lock().unwrap();
+                receiver.recv()
+            };
+
+            if let Ok(message) = message {
                 match message {
                     ServerOrRequestMessage::ServerMessage(server_message) => {
                         self.handle_server_message(server_message);
@@ -102,21 +125,18 @@ impl Server {
                     }
                 }
             } else {
+                // Handle the case where receiving a message fails
                 if *self.server_state.lock().unwrap() == ServerState::Running {
                     println!("Error receiving message on server {}.", self.id);
                 }
                 break; // Exit the loop on error
             }
 
+            // Check if we need to terminate or stop
             if *self.server_state.lock().unwrap() != ServerState::Running {
                 break;
             }
         }
-    }
-
-    fn receive_message(&self) -> Option<ServerOrRequestMessage> {
-        let receiver = self.receiver.lock().unwrap();
-        receiver.recv().ok()
     }
 
     fn handle_server_message(&mut self, message: ServerMessage) {
@@ -133,6 +153,10 @@ impl Server {
             ServerMessage::CurrentState(sender) => {
                 let _ = sender.send(*self.server_state.lock().unwrap());
             }
+            ServerMessage::CheckIfTerminating(response_sender) => {
+                let is_terminating = *self.server_state.lock().unwrap() == ServerState::Terminating;
+                let _ = response_sender.send(is_terminating);
+            }
         }
     }
 
@@ -140,6 +164,7 @@ impl Server {
         self.id
     }
 
+    /// Handles incoming requests
     pub fn handle_request(&mut self, mut rq: Request) {
         {
             let state = self.server_state.lock().unwrap();
@@ -159,28 +184,55 @@ impl Server {
             }
 
             RequestKind::ReserveTicket => {
+                // Set the server ID on the request, indicating which server is handling the
+                // reservation.
                 rq.set_server_id(self.id);
+
+                // Extract the customer ID from the request.
                 let customer_id = rq.customer_id();
+
+                // Lock and access the reservations and available tickets.
+                // `reservations` holds currently reserved tickets for customers.
                 let mut reservations = self.reservations.lock().unwrap();
+                // `available_tickets` is a queue of tickets currently available for reservation.
                 let mut available_tickets = self.available_tickets.lock().unwrap();
 
+                // Check if there is already a reservation for this customer.
                 match reservations.entry(customer_id) {
                     Entry::Occupied(_) => {
+                        // If the customer already has a reservation, respond with an error.
                         rq.respond_with_err("A ticket has already been reserved!");
                     }
                     Entry::Vacant(entry) => {
+                        // If the customer does not have a reservation yet, attempt to allocate a
+                        // ticket.
+
+                        // Try to take a ticket from the front of the `available_tickets` queue.
                         if let Some(ticket) = available_tickets.pop_front() {
+                            // Insert the new reservation for this customer with the allocated
+                            // ticket.
                             entry.insert(Reservation::new(ticket));
+                            // Respond to the customer with the allocated ticket ID.
                             rq.respond_with_int(ticket);
                         } else {
+                            // If no tickets are available in the queue, attempt to allocate a new
+                            // ticket from the database.
                             let mut db = self.database.write().unwrap();
+                            // Allocate a new ticket (attempt to allocate 1 ticket).
                             if let Some(new_ticket) = db.allocate(1).pop() {
+                                // Add the newly allocated ticket to the `available_tickets` queue.
                                 available_tickets.push_back(new_ticket);
+                                // Try to allocate a ticket again from the updated
+                                // `available_tickets` queue.
                                 if let Some(ticket) = available_tickets.pop_front() {
+                                    // Insert the new reservation for the customer.
                                     entry.insert(Reservation::new(ticket));
+                                    // Respond with the allocated ticket ID.
                                     rq.respond_with_int(ticket);
                                 }
                             } else {
+                                // If no tickets could be allocated from the database, respond with
+                                // a sold-out message.
                                 rq.respond_with_sold_out();
                             }
                         }
@@ -188,100 +240,6 @@ impl Server {
                 }
             }
 
-            RequestKind::BuyTicket => {
-                rq.set_server_id(self.id);
-                if let Some(ticket_id) = rq.read_u32() {
-                    let customer_id = rq.customer_id();
-                    let mut reservations = self.reservations.lock().unwrap();
-
-                    if let Some(reservation) = reservations.get(&customer_id) {
-                        if ticket_id != reservation.ticket {
-                            rq.respond_with_err("Invalid ticket id provided!");
-                        } else {
-                            reservations.remove(&customer_id);
-                            rq.respond_with_int(ticket_id);
-
-                            let mut db = self.database.write().unwrap();
-                            if let Some(new_ticket) = db.allocate(1).pop() {
-                                let mut available_tickets = self.available_tickets.lock().unwrap();
-                                available_tickets.push_back(new_ticket);
-                            }
-                        }
-                    } else {
-                        rq.respond_with_err("No ticket has been reserved!");
-                    }
-                } else {
-                    rq.respond_with_err("No ticket id provided!");
-                }
-            }
-
-            RequestKind::AbortPurchase => {
-                rq.set_server_id(self.id);
-                if let Some(ticket_id) = rq.read_u32() {
-                    let customer_id = rq.customer_id();
-                    let mut reservations = self.reservations.lock().unwrap();
-                    let mut available_tickets = self.available_tickets.lock().unwrap();
-
-                    if let Some(reservation) = reservations.get(&customer_id) {
-                        if ticket_id != reservation.ticket {
-                            rq.respond_with_err("Invalid ticket id provided!");
-                        } else {
-                            reservations.remove(&customer_id);
-                            available_tickets.push_back(ticket_id);
-                            rq.respond_with_int(ticket_id);
-                        }
-                    } else {
-                        rq.respond_with_err("No ticket has been reserved!");
-                    }
-                } else {
-                    rq.respond_with_err("No ticket id provided!");
-                }
-            }
-
-            _ => rq.respond_with_err("Unsupported request kind."),
-        }
-    }
-
-    pub fn get_allocated_ticket_count(&self) -> u32 {
-        self.available_tickets.lock().unwrap().len() as u32
-    }
-
-    fn update_ticket_estimate(&self, new_estimate: u32) {
-        let mut last_estimate = self.last_estimate.lock().unwrap();
-        *last_estimate = new_estimate;
-        println!(
-            "Server {} updated ticket estimate to {}",
-            self.id, new_estimate
-        );
-    }
-
-    fn shutdown(&mut self) {
-        println!("Server {} is shutting down", self.id);
-        self.return_all_non_reserved_tickets();
-        {
-            let mut state = self.server_state.lock().unwrap();
-            *state = ServerState::HasStopped;
-        }
-        println!("Server {} has been fully shut down", self.id);
-    }
-
-    fn can_safely_stop(&self) -> bool {
-        let reservations_empty = {
-            let reservations = self.reservations.lock().unwrap();
-            reservations.is_empty()
-        };
-
-        reservations_empty
-    }
-
-    pub fn handle_request_at_termination(&mut self, mut rq: Request) {
-        self.clear_expired_reservations();
-
-        match rq.kind() {
-            RequestKind::ReserveTicket => {
-                // Refuse new reservations since the server is terminating
-                rq.respond_with_err("Server is terminating, unable to process new reservations.");
-            }
             RequestKind::BuyTicket => {
                 rq.set_server_id(self.id);
                 println!("Server {} handling buy ticket request", self.id);
@@ -326,6 +284,10 @@ impl Server {
                             reservations.remove(&customer_id);
                             available_tickets.push_back(ticket_id);
                             rq.respond_with_int(ticket_id);
+
+                            // Return the ticket to the database
+                            let mut db = self.database.write().unwrap();
+                            db.deallocate(&[ticket_id]);
                         }
                     } else {
                         rq.respond_with_err("No ticket has been reserved!");
@@ -339,30 +301,32 @@ impl Server {
         }
     }
 
+    /// Terminates the server gracefully.
     pub fn terminate(&mut self) {
-        // Update the server's state to `Terminating`, indicating that it is in the process of
-        // shutting down.
+        // Set server state to terminating
         {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::Terminating;
         }
         println!("Server {} is terminating", self.id);
 
-        // Return all non-reserved tickets to the database.
+        // Return all non-reserved tickets
         self.return_all_non_reserved_tickets();
 
-        // Enter a loop to handle requests and messages until it is safe to stop.
+        // Handle incoming messages until it is safe to stop
         while !self.can_safely_stop() {
-            println!("Attempting to handle messages");
+            let message = {
+                let receiver = self.receiver.lock().unwrap();
+                receiver.recv_timeout(Duration::from_millis(50))
+            };
 
-            let message = self.receive_message();
-            if let Some(message) = message {
+            if let Ok(message) = message {
                 match message {
                     ServerOrRequestMessage::ServerMessage(server_message) => {
                         self.handle_server_message(server_message);
                     }
                     ServerOrRequestMessage::ClientRequest(request) => {
-                        self.handle_request_at_termination(request);
+                        self.handle_request(request);
                     }
                 }
             } else {
@@ -370,21 +334,37 @@ impl Server {
             }
         }
 
-        // Notify the coordinator that this server is terminating
-        self.coordinator_tx
-            .send(CoordinatorMessage::ServerTerminated(self.id))
-            .unwrap_or_else(|e| eprintln!("Failed to notify coordinator of termination: {}", e));
-
+        // Update the server's state to `HasStopped`
+        {
+            let mut state = self.server_state.lock().unwrap();
+            *state = ServerState::HasStopped;
+        }
         println!("Server {} has been gracefully terminated", self.id);
     }
 
-    fn return_all_non_reserved_tickets(&self) {
-        let mut available_tickets = self.available_tickets.lock().unwrap();
-        let tickets_to_return: Vec<_> = {
-            let mut db = self.database.write().unwrap();
-            db.allocate(available_tickets.len() as u32)
-        };
-        available_tickets.extend(tickets_to_return);
+    /// Handles server shutdown.
+    pub fn shutdown(&mut self) {
+        let state = self.server_state.lock().unwrap();
+        if *state != ServerState::Running {
+            println!("Server {} is already shut down or terminating.", self.id);
+            return;
+        }
+
+        println!("Shutting down server {}", self.id);
+        *self.server_state.lock().unwrap() = ServerState::Terminating;
+    }
+
+    /// Updates the ticket estimate with the given value.
+    fn update_ticket_estimate(&self, new_estimate: u32) {
+        let mut last_estimate = self.last_estimate.lock().unwrap();
+        *last_estimate = new_estimate;
+        println!("Updated ticket estimate to {}", new_estimate);
+    }
+
+    /// Gets the allocated ticket count from the available tickets queue.
+    fn get_allocated_ticket_count(&self) -> u32 {
+        let available_tickets = self.available_tickets.lock().unwrap();
+        available_tickets.len() as u32
     }
 
     /// Aborts and removes expired reservations.
@@ -400,5 +380,20 @@ impl Server {
                 true
             }
         });
+    }
+
+    /// Returns all non-reserved tickets to the database.
+    fn return_all_non_reserved_tickets(&self) {
+        let mut available_tickets = self.available_tickets.lock().unwrap();
+        let mut db = self.database.write().unwrap();
+        while let Some(ticket) = available_tickets.pop_front() {
+            db.deallocate(&[ticket]);
+        }
+    }
+
+    /// Checks if the server can safely stop.
+    fn can_safely_stop(&self) -> bool {
+        let reservations = self.reservations.lock().unwrap();
+        reservations.is_empty() && self.available_tickets.lock().unwrap().is_empty()
     }
 }

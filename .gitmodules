@@ -1,3 +1,0 @@
-[submodule "crates/ticket-sale-tests/tests"]
-	path = crates/ticket-sale-tests/tests
-	url = https://dgit.cs.uni-saarland.de/np/2024/np-ss24-project-community-tests.git

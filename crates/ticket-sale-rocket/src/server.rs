@@ -207,13 +207,6 @@ impl Server {
                         } else {
                             reservations.remove(&customer_id);
                             rq.respond_with_int(ticket_id);
-
-                            // Allocate a new ticket from the database to replace the sold one.
-                            let mut db = self.database.write().unwrap();
-                            if let Some(new_ticket) = db.allocate(1).pop() {
-                                let mut available_tickets = self.available_tickets.lock().unwrap();
-                                available_tickets.push_back(new_ticket);
-                            }
                         }
                     } else {
                         rq.respond_with_err("No ticket has been reserved!");
@@ -301,13 +294,6 @@ impl Server {
                             // Complete the purchase and remove the reservation
                             reservations.remove(&customer_id);
                             rq.respond_with_int(ticket_id);
-
-                            // Optionally reallocate a new ticket to the available pool
-                            let mut db = self.database.write().unwrap();
-                            if let Some(new_ticket) = db.allocate(1).pop() {
-                                let mut available_tickets = self.available_tickets.lock().unwrap();
-                                available_tickets.push_back(new_ticket);
-                            }
                         }
                     } else {
                         rq.respond_with_err("No ticket has been reserved!");

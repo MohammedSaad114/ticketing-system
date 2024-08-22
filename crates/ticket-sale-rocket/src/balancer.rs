@@ -118,8 +118,6 @@ impl Balancer {
 impl RequestHandler for Balancer {
     /// Handle incoming requests
     ///
-    /// # Arguments
-    ///
     /// * `rq` - The `Request` to be handled
     fn handle(&self, mut rq: Request) {
         if self.shutting_down.load(Ordering::SeqCst) {

@@ -1,14 +1,17 @@
 use std::collections::{hash_map::Entry, HashMap, VecDeque};
-use std::sync::mpsc::Receiver;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::mpsc::Sender;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, RwLock,
+};
 use std::time::{Duration, Instant};
 
 use ticket_sale_core::{Request, RequestKind};
 use uuid::Uuid;
 
 use super::database::Database;
-use crate::coordinator::ServerState;
-use crate::messages::{ServerMessage, ServerOrRequestMessage};
+use super::messages::CoordinatorMessage; // Assuming CoordinatorMessage is defined in the coordinator module
+
 /// Represents a server that handles ticket sales.
 pub struct Server {
     /// Unique identifier for the server.
@@ -32,7 +35,17 @@ pub struct Server {
     /// Prioritized channel for incoming requests.
     receiver: Arc<Mutex<Receiver<ServerOrRequestMessage>>>,
 
-    server_state: ServerState,
+    /// Flag indicating whether the server is currently terminating.
+    pub terminating: AtomicBool,
+
+    /// Flag indicating whether the server is currently in the process of stopping.
+    is_stopping: AtomicBool, // Added flag
+
+    /// Flag indicating whether the server has fully stopped.
+    has_stopped: AtomicBool, // Added flag
+
+    /// Channel to send messages to the Coordinator.
+    coordinator_channel: Sender<CoordinatorMessage>, // Added for messaging
 }
 
 /// Represents a ticket reservation.
@@ -68,11 +81,22 @@ impl Reservation {
 
 impl Server {
     /// Creates a new `Server` instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `database` - Shared database instance.
+    /// * `ticket_count` - Number of tickets to allocate to this server.
+    /// * `reservation_timeout` - Timeout duration for reservations in seconds.
+    /// * `coordinator_channel` - Channel to send messages to the coordinator.
+    ///
+    /// # Returns
+    ///
+    /// * `Self` - New instance of `Server`.
     pub fn new(
         database: Arc<RwLock<Database>>,
         ticket_count: u32,
         reservation_timeout: u32,
-        receiver: Arc<Mutex<Receiver<ServerOrRequestMessage>>>,
+        coordinator_channel: Sender<CoordinatorMessage>,
     ) -> Self {
         let id = Uuid::new_v4();
 
@@ -89,69 +113,11 @@ impl Server {
             reservations: Mutex::new(HashMap::new()),
             reservation_timeout: Duration::from_secs(reservation_timeout.into()),
             last_estimate: Mutex::new(0),
-            receiver,
-            server_state: ServerState::Running,
-        }
-    }
-
-    pub fn get_server_state(&mut self, state: ServerState) {
-        self.server_state = state;
-    }
-
-    pub fn run(&mut self) {
-        self.handle_messages();
-    }
-
-    /// Handles incoming messages based on their priority.
-    pub fn handle_messages(&mut self) {
-        while self.server_state == ServerState::Running {
-            let message = {
-                let receiver = self.receiver.lock().unwrap();
-                let msg = receiver.recv();
-                std::mem::drop(receiver);
-                msg
-            };
-
-            if let Ok(message) = message {
-                match message {
-                    ServerOrRequestMessage::ServerMessage(server_message) => {
-                        // release the lock before calling handle_server_message
-                        self.handle_server_message(server_message);
-                    }
-                    ServerOrRequestMessage::ClientRequest(request) => {
-                        self.handle_request(request);
-                    }
-                }
-            } else {
-                // Only print the error if the server is still supposed to be running
-                if self.server_state == ServerState::Running {
-                    println!("Error receiving message on server {}.", self.id);
-                }
-                break; // Exit the loop on receiving error, likely due to shutdown
-            }
-            if self.server_state == ServerState::Terminating {
-                break;
-            }
-            if self.server_state == ServerState::HasStopped {
-                break;
-            }
-        }
-    }
-
-    fn handle_server_message(&mut self, message: ServerMessage) {
-        match message {
-            ServerMessage::ShutdownServer => self.shutdown(),
-            ServerMessage::TerminateServer => self.terminate(),
-            ServerMessage::UpdateTicketEstimate(new_estimate) => {
-                self.update_ticket_estimate(new_estimate);
-            }
-            ServerMessage::RequestTicketCount(sender) => {
-                let ticket_count = self.get_allocated_ticket_count();
-                let _ = sender.send(ticket_count);
-            }
-            ServerMessage::CurrentState(sender) => {
-                let _ = sender.send(self.server_state);
-            }
+            running: AtomicBool::new(true),
+            terminating: AtomicBool::new(false),
+            is_stopping: AtomicBool::new(false), // Initialize the flag
+            has_stopped: AtomicBool::new(false), // Initialize the flag
+            coordinator_channel,                 // Set up the coordinator channel
         }
     }
 
@@ -161,7 +127,20 @@ impl Server {
 
     /// Handles incoming requests
     pub fn handle_request(&mut self, mut rq: Request) {
-        if self.server_state == ServerState::HasStopped {
+        // Check if the server is currently stopping.
+        if self.is_stopping.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is stopping.");
+            return;
+        }
+
+        // Check if the server is currently terminating.
+        if self.terminating.load(Ordering::SeqCst) {
+            rq.respond_with_err("Server is terminating.");
+            return;
+        }
+
+        // Check if the server is currently running.
+        if !self.running.load(Ordering::SeqCst) {
             rq.respond_with_err("Server is shutting down.");
             return;
         }
@@ -405,18 +384,15 @@ impl Server {
             available_tickets.push_back(reservation.ticket);
         }
 
-        while let Some(ticket) = available_tickets.pop_front() {
-            {
-                let mut db = self.database.write().unwrap();
-                db.deallocate(&[ticket]); // Pass a slice of `u32` to the `deallocate` method
-                println!(
-                    "Server {} returned ticket {} to the database.",
-                    self.id, ticket
-                );
-            }
-        }
-        self.server_state = ServerState::HasStopped;
-        println!("Server {} has been gracefully terminated", self.id);
+        println!("Server {} has been fully shut down", self.id);
+
+        // Mark the server as fully stopped.
+        self.has_stopped.store(true, Ordering::SeqCst);
+
+        // Notify the Coordinator about the shutdown.
+        let _ = self
+            .coordinator_channel
+            .send(CoordinatorMessage::ServerUpdate(self.id, 0));
     }
 
     /// Aborts and removes expired reservations.
@@ -440,11 +416,28 @@ impl Server {
             }
         });
 
-        if expired_count > 0 {
-            println!(
-                "Server {} cleared {} expired reservations and returned their tickets.",
-                self.id, expired_count
-            );
-        }
+        // Add tickets back to the central database.
+        db.deallocate(&tickets_to_return);
+
+        // Also add remaining available tickets to the database.
+        let remaining_tickets: Vec<u32> = available_tickets.drain(..).collect();
+        db.deallocate(&remaining_tickets);
+
+        println!("Server {} has been fully terminated", self.id);
+
+        // Notify the Coordinator about the termination.
+        let _ = self
+            .coordinator_channel
+            .send(CoordinatorMessage::ServerUpdate(self.id, 0));
+    }
+
+    /// Initiates the stopping process for the server.
+    pub fn stop(&self) {
+        // Mark the server as stopping.
+        self.is_stopping.store(true, Ordering::SeqCst);
+        println!("Server {} is stopping", self.id);
+
+        // Proceed to shutdown the server.
+        self.shutdown();
     }
 }

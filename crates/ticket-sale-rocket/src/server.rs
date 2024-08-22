@@ -291,10 +291,6 @@ impl Server {
                 rq.respond_with_err("Server {} is terminating. Please try server {:?}.");
             }
             RequestKind::BuyTicket => {
-                println!(
-                    "Server {} handling buy ticket request at termination",
-                    self.id
-                );
                 rq.set_server_id(self.id);
                 if let Some(ticket_id) = rq.read_u32() {
                     let customer_id = rq.customer_id();

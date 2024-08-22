@@ -6,7 +6,6 @@ use std::sync::{
     Arc, RwLock,
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
 
 use ticket_sale_core::Config;
 use uuid::Uuid;
@@ -115,7 +114,7 @@ impl Coordinator {
             server_state.clone(),
         )));
 
-        let server_clone = Arc::clone(&server);
+        let server_clone: Arc<RwLock<Server>> = Arc::clone(&server);
         let handle = thread::spawn(move || {
             let mut server = server_clone.write().unwrap();
             server.run();
@@ -143,11 +142,7 @@ impl Coordinator {
             }
             // Decrease the number of servers.
             std::cmp::Ordering::Less => {
-                // Collect the server IDs from the `servers` map into a vector.
                 let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
-
-                // Iterate over the server IDs that need to be terminated, starting from
-                // `num_servers`.
                 for server_id in server_ids.iter().skip(num_servers) {
                     if let Some((sender, server_state, _)) = servers.get_mut(server_id) {
                         {
@@ -155,8 +150,6 @@ impl Coordinator {
                             *state = ServerState::Terminating;
                         }
 
-                        // Send a termination message to the server to initiate the shutdown
-                        // process.
                         sender
                             .send(ServerOrRequestMessage::ServerMessage(
                                 ServerMessage::TerminateServer,
@@ -169,8 +162,6 @@ impl Coordinator {
                             });
                     }
                 }
-                // Clean up terminated servers after adjusting the number of servers
-                self.cleanup_terminated_servers();
             }
 
             _ => {}
@@ -227,9 +218,7 @@ impl Coordinator {
     /// Handles incoming messages and updates the coordinator state accordingly.
     pub fn run(&self, rx: Receiver<CoordinatorMessage>) {
         while self.running.load(Ordering::SeqCst) {
-            // Now process the incoming messages
-            if let Ok(message) = rx.recv_timeout(Duration::from_millis(100)) {
-                // Add a small timeout to avoid blocking indefinitely
+            if let Ok(message) = rx.recv() {
                 match message {
                     CoordinatorMessage::GetNumServers(sender) => {
                         let num_servers = self.get_running_servers().len() as u32;
@@ -263,6 +252,7 @@ impl Coordinator {
                     }
                 }
             } else {
+                eprintln!("Coordinator failed to receive message.");
             }
         }
     }

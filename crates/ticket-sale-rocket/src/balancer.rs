@@ -187,10 +187,6 @@ impl RequestHandler for Balancer {
                                     available_server: available_id,
                                 })
                                 .unwrap_or_else(|_e| {
-                                    eprintln!(
-                                        "Failed to send request to server {}: {}",
-                                        new_server_id, _e
-                                    );
                                 });
                         } else {
                             rq.respond_with_err("Assigned server not found.");

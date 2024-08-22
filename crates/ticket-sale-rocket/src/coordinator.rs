@@ -147,14 +147,24 @@ impl Coordinator {
             }
             // Decrease the number of servers.
             std::cmp::Ordering::Less => {
+                // Collect the server IDs from the `servers` map into a vector.
                 let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
+
+                // Iterate over the server IDs that need to be terminated, starting from
+                // `num_servers`.
                 for server_id in server_ids.iter().skip(num_servers) {
+                    // Remove the server from the map and retrieve its components: sender, state,
+                    // and handle.
                     if let Some((sender, server_state, handle)) = servers.remove(server_id) {
+                        // Set the server's state to `Terminating` to indicate that it is shutting
+                        // down.
                         {
                             let mut state = server_state.lock().unwrap();
                             *state = ServerState::Terminating;
                         }
 
+                        // Send a termination message to the server to initiate the shutdown
+                        // process.
                         sender
                             .send(ServerOrRequestMessage::ServerMessage(
                                 ServerMessage::TerminateServer,
@@ -166,6 +176,7 @@ impl Coordinator {
                                 );
                             });
 
+                        // Record the handle of the terminating server to keep track of it.
                         let mut terminating_handles = self.terminating_handles.write().unwrap();
                         terminating_handles.push((*server_id, Some(handle)));
                     }

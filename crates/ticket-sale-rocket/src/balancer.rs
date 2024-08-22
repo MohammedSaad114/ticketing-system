@@ -55,15 +55,7 @@ impl Balancer {
         }
     }
 
-    /// Set the Estimator's JoinHandle.
-    ///
-    /// # Arguments
-    ///
-    /// * `handle` - JoinHandle for the Estimator thread.
-    ///
-    /// # Returns
-    ///
-    /// * `Self` - The `Balancer` instance with the estimator handle set.
+    /// Sets the Estimator's JoinHandle for the balancer.
     pub fn set_estimator_handle(mut self, handle: JoinHandle<()>) -> Self {
         self.estimator_handle = Some(handle);
         self
@@ -78,14 +70,19 @@ impl Balancer {
     ///
     /// # Returns
     ///
-    /// * `Option<Uuid>` - The ID of the assigned server, or None if no server is
-    ///   available.
+    /// * `Uuid` - The ID of the assigned server.
     fn assign_server(&self, customer_id: Uuid) -> Option<Uuid> {
         // Acquire a write lock on the customer-to-server map.
         let mut customer_server_map = self.customer_server_map.write().unwrap();
 
+        // If the customer is already mapped to a server, check if that server is terminating
         if let Some(&server_id) = customer_server_map.get(&customer_id) {
-            return Some(server_id);
+            if !self.coordinator.as_ref()?.is_server_terminating(server_id) {
+                return Some(server_id);
+            } else {
+                // If the server is terminating, remove it from the map
+                customer_server_map.remove(&customer_id);
+            }
         }
 
         let server_ids = self.coordinator.as_ref()?.get_servers();
@@ -95,32 +92,20 @@ impl Balancer {
         }
 
         let server_count = server_ids.len();
-        let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
-        let server_id = server_ids[index];
+        let mut index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
 
-        if self.coordinator.as_ref()?.is_server_terminating(server_id) {
-            for &id in &server_ids {
-                if id != server_id && !self.coordinator.as_ref()?.is_server_terminating(id) {
-                    customer_server_map.insert(customer_id, id);
-                    return Some(id);
-                }
+        // Iterate through available servers until a non-terminating one is found
+        for _ in 0..server_count {
+            let server_id = server_ids[index];
+            if !self.coordinator.as_ref()?.is_server_terminating(server_id) {
+                customer_server_map.insert(customer_id, server_id);
+                return Some(server_id);
             }
-            return None;
+            index = (index + 1) % server_count;
         }
 
-        customer_server_map.insert(customer_id, server_id);
-
-        Some(server_id)
-    }
-
-    /// Notify the coordinator to shut down servers and clean up.
-    fn initiate_shutdown(&self) {
-        if let Some(coordinator) = &self.coordinator {
-            coordinator
-                .get_message_tx()
-                .send(CoordinatorMessage::Shutdown)
-                .unwrap();
-        }
+        // If all servers are terminating, return None
+        None
     }
 }
 
@@ -211,13 +196,14 @@ impl RequestHandler for Balancer {
         }
     }
 
-    /// Shut down the balancer and notify the coordinator
+    /// Shut down the balancer
     fn shutdown(self) {
         self.shutting_down.store(true, Ordering::SeqCst);
         println!("Balancer is shutting down");
 
-        // Notify the coordinator to shut down all servers
-        self.initiate_shutdown();
+        if let Some(coordinator) = self.coordinator {
+            coordinator.shutdown();
+        }
 
         if let Some(handle) = self.estimator_handle {
             handle.join().unwrap();

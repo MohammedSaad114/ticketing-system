@@ -51,7 +51,15 @@ impl Reservation {
         }
     }
 
-    /// Returns the age of the ticket in seconds.
+    /// Returns the age of the ticket.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - instance of the ticket.
+    ///
+    /// # Returns
+    ///
+    /// * `age` - in seconds.
     #[inline]
     fn age_secs(&self) -> u64 {
         self.timestamp.elapsed().as_secs()
@@ -213,6 +221,7 @@ impl Server {
                             reservations.remove(&customer_id);
                             rq.respond_with_int(ticket_id);
 
+                            // Allocate a new ticket from the database to replace the sold one.
                             let mut db = self.database.write().unwrap();
                             if let Some(new_ticket) = db.allocate(1).pop() {
                                 let mut available_tickets = self.available_tickets.lock().unwrap();

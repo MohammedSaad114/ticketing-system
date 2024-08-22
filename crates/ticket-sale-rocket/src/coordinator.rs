@@ -71,7 +71,6 @@ impl Coordinator {
         message_tx: Sender<CoordinatorMessage>,
     ) -> Self {
         let mut servers = HashMap::new();
-
         for _ in 0..config.initial_servers {
             let (server, sender, server_state, handle) =
                 Self::spawn_server(database.clone(), config.timeout);

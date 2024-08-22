@@ -22,7 +22,10 @@ pub enum Message<T> {
 
 pub enum ServerOrRequestMessage {
     ServerMessage(ServerMessage),
-    ClientRequest(Request),
+    ClientRequest {
+        request: Request,
+        available_server: Option<Uuid>,
+    },
 }
 
 // Define the enum for messages that the server can receive

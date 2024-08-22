@@ -99,15 +99,13 @@ impl Server {
         self.handle_messages();
     }
 
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
     /// Handles incoming messages based on their priority.
     pub fn handle_messages(&mut self) {
         loop {
-            // Check server state at the start of the loop
-            let state = *self.server_state.lock().unwrap();
-            if state != ServerState::Running {
-                break;
-            }
-
             let message = {
                 let receiver = self.receiver.lock().unwrap();
                 receiver.recv()
@@ -118,14 +116,17 @@ impl Server {
                     ServerOrRequestMessage::ServerMessage(server_message) => {
                         self.handle_server_message(server_message);
                     }
-                    ServerOrRequestMessage::ClientRequest(request) => {
-                        self.handle_request(request);
+                    ServerOrRequestMessage::ClientRequest {
+                        request,
+                        available_server,
+                    } => {
+                        self.handle_request(request, available_server);
                     }
                 }
             } else {
                 // Handle the case where receiving a message fails
                 if *self.server_state.lock().unwrap() == ServerState::Running {
-                    println!("Error receiving message on server {}.", self.id);
+                    ("Error receiving message on server {}.", self.id);
                 }
                 break; // Exit the loop on error
             }
@@ -154,12 +155,8 @@ impl Server {
         }
     }
 
-    pub fn id(&self) -> Uuid {
-        self.id
-    }
-
     /// Handles incoming requests
-    pub fn handle_request(&mut self, mut rq: Request) {
+    pub fn handle_request(&mut self, mut rq: Request, available_server: Option<Uuid>) {
         {
             let state = self.server_state.lock().unwrap();
             if *state == ServerState::Terminating || *state == ServerState::HasStopped {
@@ -170,7 +167,6 @@ impl Server {
             }
         }
         self.clear_expired_reservations();
-
         match rq.kind() {
             RequestKind::NumAvailableTickets => {
                 let estimate = *self.last_estimate.lock().unwrap();
@@ -208,7 +204,7 @@ impl Server {
 
             RequestKind::BuyTicket => {
                 rq.set_server_id(self.id);
-                println!("Server {} handling buy ticket request", self.id);
+                ("Server {} handling buy ticket request", self.id);
                 if let Some(ticket_id) = rq.read_u32() {
                     let customer_id = rq.customer_id();
                     let mut reservations: std::sync::MutexGuard<HashMap<Uuid, Reservation>> =
@@ -270,20 +266,21 @@ impl Server {
     fn update_ticket_estimate(&self, new_estimate: u32) {
         let mut last_estimate = self.last_estimate.lock().unwrap();
         *last_estimate = new_estimate;
-        println!(
+        (
             "Server {} updated ticket estimate to {}",
-            self.id, new_estimate
+            self.id,
+            new_estimate,
         );
     }
 
     pub fn shutdown(&mut self) {
-        println!("Server {} is shutting down", self.id);
+        ("Server {} is shutting down", self.id);
         self.return_all_non_reserved_tickets();
         {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::HasStopped;
         }
-        println!("Server {} has been fully shut down", self.id);
+        ("Server {} has been fully shut down", self.id);
     }
 
     fn can_safely_stop(&self) -> bool {
@@ -295,15 +292,24 @@ impl Server {
         reservations_empty
     }
 
-    pub fn handle_request_at_termination(&mut self, mut rq: Request) {
+    pub fn handle_request_at_termination(
+        &mut self,
+        mut rq: Request,
+        available_server: Option<Uuid>,
+    ) {
+        self.clear_expired_reservations();
         let mut reservations = self.reservations.lock().unwrap();
 
         match rq.kind() {
             RequestKind::ReserveTicket => {
                 // Refuse new reservations since the server is terminating
-                rq.respond_with_err("Server is terminating, unable to process new reservations.");
+                rq.respond_with_err("Server {} is terminating. Please try server {:?}.");
             }
             RequestKind::BuyTicket => {
+                println!(
+                    "Server {} handling buy ticket request at termination",
+                    self.id
+                );
                 rq.set_server_id(self.id);
                 if let Some(ticket_id) = rq.read_u32() {
                     let customer_id = rq.customer_id();
@@ -361,14 +367,14 @@ impl Server {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::Terminating;
         }
-        println!("Server {} is terminating", self.id);
+        ("Server {} is terminating", self.id);
 
         // (a) Return all non-reserved tickets immediately
         self.return_all_non_reserved_tickets();
 
         while !self.can_safely_stop() {
             self.clear_expired_reservations();
-            println!("Attempting to handle messages");
+            ("Attempting to handle messages");
 
             let message = {
                 let receiver = self.receiver.lock().unwrap();
@@ -380,8 +386,11 @@ impl Server {
                     ServerOrRequestMessage::ServerMessage(server_message) => {
                         self.handle_server_message(server_message);
                     }
-                    ServerOrRequestMessage::ClientRequest(request) => {
-                        self.handle_request_at_termination(request);
+                    ServerOrRequestMessage::ClientRequest {
+                        request,
+                        available_server,
+                    } => {
+                        self.handle_request_at_termination(request, available_server);
                     }
                 }
             } else {
@@ -395,7 +404,7 @@ impl Server {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::HasStopped;
         }
-        println!("Server {} has been gracefully terminated", self.id);
+        ("Server {} has been gracefully terminated", self.id);
     }
 
     fn return_all_non_reserved_tickets(&mut self) {
@@ -406,10 +415,10 @@ impl Server {
             let tickets_to_return: Vec<u32> = available_tickets.drain(..).collect();
             let mut db = self.database.write().unwrap();
             db.deallocate(&tickets_to_return);
-            println!(
+            (
                 "Server {} returned {} non-reserved tickets to the database.",
                 self.id,
-                tickets_to_return.len()
+                tickets_to_return.len(),
             );
         }
     }

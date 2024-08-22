@@ -1,33 +1,71 @@
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::{
+    collections::HashMap,
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc, Mutex, RwLock,
+    },
+    thread::JoinHandle,
+};
 
 use ticket_sale_core::Request;
 use uuid::Uuid;
 
-use crate::coordinator::ServerState;
+use crate::server::Server;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerState {
+    Running,
+    Terminating,
+    HasStopped,
+}
+
+/// Coordinator manages the servers and the database, handling server scaling and request
+/// routing.
+pub type ServerMap = Arc<
+    RwLock<
+        HashMap<
+            Uuid,
+            (
+                Sender<ServerOrRequestMessage>,
+                Arc<Mutex<ServerState>>,
+                JoinHandle<()>,
+            ),
+        >,
+    >,
+>;
+
+pub type ServerSpawn = (
+    Arc<RwLock<Server>>,
+    Sender<ServerOrRequestMessage>,
+    Arc<Mutex<ServerState>>,
+    JoinHandle<()>,
+);
 // Define the enum for messages that will be passed between the Balancer and Coordinator.
 pub enum CoordinatorMessage {
     GetNumServers(Sender<u32>),
     SetNumServers(usize, Sender<u32>),
     GetServers(Sender<Vec<Uuid>>),
+    GetTerminatingServers(Sender<Vec<Uuid>>),
+    GetRunningAndTerminatingServers(Sender<(Vec<Uuid>, Vec<Uuid>)>),
     GetServerSender(Uuid, Sender<Sender<ServerOrRequestMessage>>),
     Shutdown,
-    ServerTerminated(Uuid),
 }
 
-// Define the enum for messages with different priorities.
 pub enum Message<T> {
     HighPriority(T),
     NormalPriority(T),
 }
-
 #[derive(Debug)]
+
 pub enum ServerOrRequestMessage {
     ServerMessage(ServerMessage),
-    ClientRequest(Request),
+    ClientRequest {
+        request: Request,
+        available_server: Option<Uuid>,
+    },
 }
 
-// Define the enum for messages that the server can receive.
+// Define the enum for messages that the server can receive
 #[derive(Debug, Clone)]
 pub enum ServerMessage {
     ShutdownServer,  // Immediate shutdown

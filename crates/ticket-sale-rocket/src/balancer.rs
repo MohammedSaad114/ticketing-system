@@ -74,8 +74,15 @@ impl Balancer {
     fn assign_server(&self, customer_id: Uuid) -> Option<Uuid> {
         // Acquire a write lock on the customer-to-server map.
         let mut customer_server_map = self.customer_server_map.write().unwrap();
+
+        // If the customer is already mapped to a server, check if that server is terminating
         if let Some(&server_id) = customer_server_map.get(&customer_id) {
-            return Some(server_id);
+            if !self.coordinator.as_ref()?.is_server_terminating(server_id) {
+                return Some(server_id);
+            } else {
+                // If the server is terminating, remove it from the map
+                customer_server_map.remove(&customer_id);
+            }
         }
 
         let server_ids = self.coordinator.as_ref()?.get_servers();
@@ -85,19 +92,20 @@ impl Balancer {
         }
 
         let server_count = server_ids.len();
-        let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
-        let server_id = server_ids[index];
+        let mut index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
 
-        for &id in &server_ids {
-            if id != server_id && !self.coordinator.as_ref()?.is_server_terminating(id) {
-                customer_server_map.insert(customer_id, id);
-                return Some(id);
+        // Iterate through available servers until a non-terminating one is found
+        for _ in 0..server_count {
+            let server_id = server_ids[index];
+            if !self.coordinator.as_ref()?.is_server_terminating(server_id) {
+                customer_server_map.insert(customer_id, server_id);
+                return Some(server_id);
             }
+            index = (index + 1) % server_count;
         }
-        customer_server_map.insert(customer_id, server_id);
-        println!("Assigned {} to {}", customer_id, server_id);
 
-        Some(server_id)
+        // If all servers are terminating, return None
+        None
     }
 }
 

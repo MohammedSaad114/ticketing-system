@@ -297,18 +297,11 @@ impl Server {
 
     pub fn handle_request_at_termination(&mut self, mut rq: Request) {
         let mut reservations = self.reservations.lock().unwrap();
+
         match rq.kind() {
             RequestKind::ReserveTicket => {
-                // Refuse new reservations and redirect client to another server
-                let other_server_id: Option<Uuid> = None;
-                if let Some(other_id) = other_server_id {
-                    rq.respond_with_err(&format!(
-                        "Server is terminating, please try another server: {}",
-                        other_id
-                    ));
-                } else {
-                    rq.respond_with_err("Server is terminating, no available servers.");
-                }
+                // Refuse new reservations since the server is terminating
+                rq.respond_with_err("Server is terminating, unable to process new reservations.");
             }
             RequestKind::BuyTicket => {
                 rq.set_server_id(self.id);
@@ -318,9 +311,11 @@ impl Server {
                         if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
+                            // Complete the purchase and remove the reservation
                             reservations.remove(&customer_id);
                             rq.respond_with_int(ticket_id);
 
+                            // Optionally reallocate a new ticket to the available pool
                             let mut db = self.database.write().unwrap();
                             if let Some(new_ticket) = db.allocate(1).pop() {
                                 let mut available_tickets = self.available_tickets.lock().unwrap();
@@ -342,6 +337,7 @@ impl Server {
                         if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
+                            // Abort the purchase and return the ticket to the available pool
                             reservations.remove(&customer_id);
                             let mut available_tickets = self.available_tickets.lock().unwrap();
                             available_tickets.push_back(ticket_id);
@@ -355,7 +351,7 @@ impl Server {
                 }
             }
             _ => {
-                rq.respond_with_err("Server is terminating, please try another server.");
+                rq.respond_with_err("Server is terminating, unable to process the request.");
             }
         }
     }

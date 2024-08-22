@@ -22,7 +22,7 @@ pub enum Message<T> {
 
 pub enum ServerOrRequestMessage {
     ServerMessage(ServerMessage),
-    ClientRequest(Request),
+    ClientRequest { request: Request },
 }
 
 // Define the enum for messages that the server can receive

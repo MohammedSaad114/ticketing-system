@@ -75,37 +75,33 @@ impl Balancer {
         // Acquire a write lock on the customer-to-server map.
         let mut customer_server_map = self.customer_server_map.write().unwrap();
 
-        // If the customer is already mapped to a server, check if that server is terminating
+        // Check if the customer is already mapped to a server.
         if let Some(&server_id) = customer_server_map.get(&customer_id) {
-            if !self.coordinator.as_ref()?.is_server_terminating(server_id) {
-                return Some(server_id);
-            } else {
-                // If the server is terminating, remove it from the map
+            // If the server has stopped, remove the mapping.
+            if self.coordinator.as_ref()?.has_server_stopped(server_id) {
                 customer_server_map.remove(&customer_id);
+            } else {
+                // If the server is still running, return it.
+                return Some(server_id);
             }
         }
 
-        let server_ids = self.coordinator.as_ref()?.get_servers();
+        // Get the list of running servers from the coordinator.
+        let server_ids = self.coordinator.as_ref()?.get_running_servers();
 
         if server_ids.is_empty() {
             return None;
         }
 
         let server_count = server_ids.len();
-        let mut index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
+        let index = self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
 
-        // Iterate through available servers until a non-terminating one is found
-        for _ in 0..server_count {
-            let server_id = server_ids[index];
-            if !self.coordinator.as_ref()?.is_server_terminating(server_id) {
-                customer_server_map.insert(customer_id, server_id);
-                return Some(server_id);
-            }
-            index = (index + 1) % server_count;
-        }
+        // Assign the customer to a server in a round-robin fashion.
+        let server_id = server_ids[index];
+        customer_server_map.insert(customer_id, server_id);
+        println!("Assigned customer {} to server {}", customer_id, server_id);
 
-        // If all servers are terminating, return None
-        None
+        Some(server_id)
     }
 }
 
@@ -181,7 +177,7 @@ impl RequestHandler for Balancer {
                     if let Some(coordinator) = &self.coordinator {
                         if let Some(server_sender) = coordinator.get_server_sender(server_id) {
                             server_sender
-                                .send(ServerOrRequestMessage::ClientRequest(rq))
+                                .send(ServerOrRequestMessage::ClientRequest { request: rq })
                                 .unwrap();
                         } else {
                             rq.respond_with_err("Server not found.");

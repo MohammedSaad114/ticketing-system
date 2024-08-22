@@ -175,13 +175,9 @@ impl RequestHandler for Balancer {
                 let customer_id = rq.customer_id();
                 if let Some(server_id) = self.assign_server(customer_id) {
                     if let Some(coordinator) = &self.coordinator {
-                        let available_id = coordinator.get_available_server(server_id);
                         if let Some(server_sender) = coordinator.get_server_sender(server_id) {
                             server_sender
-                                .send(ServerOrRequestMessage::ClientRequest {
-                                    request: rq,
-                                    available_server: available_id,
-                                })
+                                .send(ServerOrRequestMessage::ClientRequest { request: rq })
                                 .unwrap();
                         } else {
                             rq.respond_with_err("Server not found.");

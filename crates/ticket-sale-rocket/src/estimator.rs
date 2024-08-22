@@ -74,7 +74,7 @@ impl Estimator {
             while running.load(Ordering::SeqCst) {
                 let start_time = Instant::now();
 
-                let servers = coordinator.get_servers();
+                let servers = coordinator.get_running_servers();
                 let num_servers = servers.len() as u32;
 
                 // If no servers are available, sleep for a short time and continue

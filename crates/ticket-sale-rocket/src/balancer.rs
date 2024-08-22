@@ -219,6 +219,5 @@ impl RequestHandler for Balancer {
             handle.join().unwrap();
         }
 
-        println!("Balancer has been fully shut down");
     }
 }

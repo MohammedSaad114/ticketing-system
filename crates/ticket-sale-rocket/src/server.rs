@@ -35,7 +35,6 @@ pub struct Server {
     server_state: Arc<Mutex<ServerState>>,
 }
 
-/// Represents a ticket reservation.
 struct Reservation {
     ticket: u32,
     timestamp: Instant,

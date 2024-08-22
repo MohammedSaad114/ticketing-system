@@ -278,7 +278,7 @@ impl Server {
 
     pub fn shutdown(&mut self) {
         println!("Server {} is shutting down", self.id);
-        self.return_all_tickets();
+        self.return_all_non_reserved_tickets();
         {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::HasStopped;
@@ -363,6 +363,9 @@ impl Server {
         }
         println!("Server {} is terminating", self.id);
 
+        // (a) Return all non-reserved tickets immediately
+        self.return_all_non_reserved_tickets();
+
         while !self.can_safely_stop() {
             self.clear_expired_reservations();
             println!("Attempting to handle messages");
@@ -370,7 +373,6 @@ impl Server {
             let message = {
                 let receiver = self.receiver.lock().unwrap();
                 receiver.recv_timeout(Duration::from_millis(50)) // Fixed non-blocking
-                                                                 // wait
             };
 
             if let Ok(message) = message {
@@ -388,7 +390,7 @@ impl Server {
             }
         }
 
-        self.return_all_tickets();
+        self.return_all_non_reserved_tickets();
         {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::HasStopped;
@@ -396,26 +398,16 @@ impl Server {
         println!("Server {} has been gracefully terminated", self.id);
     }
 
-    fn return_all_tickets(&mut self) {
-        let mut reservations = self.reservations.lock().unwrap();
+    fn return_all_non_reserved_tickets(&mut self) {
         let mut available_tickets = self.available_tickets.lock().unwrap();
 
-        // Cancel all reservations and release tickets
-        for (customer_id, reservation) in reservations.drain() {
-            println!(
-                "Releasing ticket {} for customer {}",
-                reservation.ticket, customer_id
-            );
-            available_tickets.push_back(reservation.ticket);
-        }
-
-        // Use bulk deallocation to optimize the operation
+        // Deallocate all non-reserved tickets and return them to the central database
         if !available_tickets.is_empty() {
             let tickets_to_return: Vec<u32> = available_tickets.drain(..).collect();
             let mut db = self.database.write().unwrap();
             db.deallocate(&tickets_to_return);
             println!(
-                "Server {} returned {} tickets to the database.",
+                "Server {} returned {} non-reserved tickets to the database.",
                 self.id,
                 tickets_to_return.len()
             );

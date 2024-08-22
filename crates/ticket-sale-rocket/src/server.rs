@@ -352,9 +352,6 @@ impl Server {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::Terminating;
         }
-        // (a) Return all non-reserved tickets immediately
-        self.return_all_non_reserved_tickets();
-
         while !self.can_safely_stop() {
             self.clear_expired_reservations();
             let message = {
@@ -384,17 +381,6 @@ impl Server {
         {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::HasStopped;
-        }
-    }
-
-    fn return_all_non_reserved_tickets(&mut self) {
-        let mut available_tickets = self.available_tickets.lock().unwrap();
-
-        // Deallocate all non-reserved tickets and return them to the central database
-        if !available_tickets.is_empty() {
-            let tickets_to_return: Vec<u32> = available_tickets.drain(..).collect();
-            let mut db = self.database.write().unwrap();
-            db.deallocate(&tickets_to_return);
         }
     }
 

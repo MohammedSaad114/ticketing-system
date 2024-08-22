@@ -186,7 +186,7 @@ impl Coordinator {
     /// # Returns
     ///
     /// * Vec<Uuid> - List of server IDs.
-    fn get_running_servers(&self) -> Vec<Uuid> {
+    pub fn get_running_servers(&self) -> Vec<Uuid> {
         let servers = self.servers.read().unwrap();
         let mut running_servers = Vec::new();
 

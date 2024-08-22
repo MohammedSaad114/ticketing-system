@@ -211,7 +211,6 @@ impl RequestHandler for Balancer {
 
             // Send the shutdown message to the Coordinator
             if let Err(e) = message_tx.send(CoordinatorMessage::Shutdown) {
-                eprintln!("Failed to send shutdown message to the coordinator: {}", e);
             }
         }
 

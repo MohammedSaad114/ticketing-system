@@ -396,11 +396,6 @@ impl Server {
         if !tickets_to_return.is_empty() {
             let mut db = self.database.write().unwrap();
             db.deallocate(&tickets_to_return);
-            println!(
-                "Server {} returned {} tickets to the database.",
-                self.id,
-                tickets_to_return.len()
-            );
         }
     }
 }

@@ -1,8 +1,9 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{mpsc::channel, Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::messages::{ServerMessage, ServerOrRequestMessage};
 use crate::{Coordinator, Database};
 
 /// The `Estimator` is responsible for estimating and updating the resource availability
@@ -73,7 +74,7 @@ impl Estimator {
             while running.load(Ordering::SeqCst) {
                 let start_time = Instant::now();
 
-                let servers = coordinator.get_servers();
+                let servers = coordinator.get_running_servers();
                 let num_servers = servers.len() as u32;
 
                 // If no servers are available, sleep for a short time and continue
@@ -90,20 +91,25 @@ impl Estimator {
 
                 let mut total_allocated_tickets = 0;
                 for server_id in &servers {
-                    if let Some(server) = coordinator.get_server(*server_id) {
-                        total_allocated_tickets +=
-                            server.read().unwrap().get_allocated_ticket_count();
+                    if let Some(server_sender) = coordinator.get_server_sender(*server_id) {
+                        let (ticket_count_tx, ticket_count_rx) = channel();
+                        let _ = server_sender.send(ServerOrRequestMessage::ServerMessage(
+                            ServerMessage::RequestTicketCount(ticket_count_tx),
+                        ));
+
+                        if let Ok(ticket_count) = ticket_count_rx.recv() {
+                            total_allocated_tickets += ticket_count;
+                        }
                     }
                 }
 
                 let total_available_tickets = db_available + total_allocated_tickets;
 
                 for server_id in servers {
-                    if let Some(server) = coordinator.get_server(server_id) {
-                        server
-                            .write()
-                            .unwrap()
-                            .update_estimate(total_available_tickets);
+                    if let Some(server_sender) = coordinator.get_server_sender(server_id) {
+                        let _ = server_sender.send(ServerOrRequestMessage::ServerMessage(
+                            ServerMessage::UpdateTicketEstimate(total_available_tickets),
+                        ));
                     }
                 }
 
@@ -111,7 +117,18 @@ impl Estimator {
                 let remaining_time = roundtrip_duration
                     .checked_sub(elapsed)
                     .unwrap_or(Duration::new(0, 0));
-                std::thread::sleep(remaining_time);
+
+                let (lock, cv) = &*shutdown_cv;
+                let mut shutdown_complete = lock.lock().unwrap();
+                if *shutdown_complete {
+                    break;
+                }
+                let timeout_result = cv.wait_timeout(shutdown_complete, remaining_time).unwrap();
+                shutdown_complete = timeout_result.0;
+
+                if *shutdown_complete {
+                    break;
+                }
             }
 
             let (lock, cv) = &*shutdown_cv;
@@ -120,7 +137,6 @@ impl Estimator {
             cv.notify_all();
         });
 
-        // Store the handle
         *self.handle.lock().unwrap() = Some(handle);
     }
 
@@ -132,9 +148,8 @@ impl Estimator {
 
         let (lock, cv) = &*self.shutdown_cv;
         let mut shutdown_complete = lock.lock().unwrap();
-        while !*shutdown_complete {
-            shutdown_complete = cv.wait(shutdown_complete).unwrap();
-        }
+        *shutdown_complete = true;
+        cv.notify_all(); // Signal the thread to wake up if it's sleeping
 
         if let Some(handle) = self.handle.lock().unwrap().take() {
             handle.join().unwrap();

@@ -3,7 +3,7 @@ use std::sync::{mpsc::channel, Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::messages::{ServerMessage, ServerOrRequestMessage};
+use crate::util::{ServerMessage, ServerOrRequestMessage};
 use crate::{Coordinator, Database};
 
 /// The `Estimator` is responsible for estimating and updating the resource availability
@@ -74,7 +74,7 @@ impl Estimator {
             while running.load(Ordering::SeqCst) {
                 let start_time = Instant::now();
 
-                let servers = coordinator.get_running_servers();
+                let servers = coordinator.get_servers();
                 let num_servers = servers.len() as u32;
 
                 // If no servers are available, sleep for a short time and continue

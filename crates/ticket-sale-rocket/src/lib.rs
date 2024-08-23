@@ -10,13 +10,13 @@ mod balancer;
 mod coordinator;
 mod database;
 mod estimator;
-mod messages;
 mod server;
+mod util;
 
 pub use balancer::Balancer;
 use coordinator::Coordinator;
 use database::Database;
-use messages::CoordinatorMessage;
+use util::CoordinatorMessage;
 
 /// Entrypoint of your implementation
 ///
@@ -63,3 +63,4 @@ pub fn launch(config: &Config) -> Balancer {
     // Return the initialized Balancer instance
     balancer
 }
+

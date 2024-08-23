@@ -63,3 +63,4 @@ pub fn launch(config: &Config) -> Balancer {
     // Return the initialized Balancer instance
     balancer
 }
+

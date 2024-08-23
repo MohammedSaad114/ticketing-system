@@ -270,8 +270,7 @@ impl Server {
         mut rq: Request,
         available_server: Option<Uuid>,
     ) {
-        let mut reservations = self.reservations.lock().unwrap();
-
+        self.clear_expired_reservations();
         match rq.kind() {
             RequestKind::ReserveTicket => {
                 // Refuse new reservations since the server is terminating
@@ -282,11 +281,12 @@ impl Server {
                 rq.set_server_id(self.id);
                 if let Some(ticket_id) = rq.read_u32() {
                     let customer_id = rq.customer_id();
-                    if let Some(reservation) = reservations.get(&customer_id) {
+                    if let Some(reservation) = self.reservations.lock().unwrap().get(&customer_id) {
                         if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
                             // Complete the purchase and remove the reservation
+                            let mut reservations = self.reservations.lock().unwrap();
                             reservations.remove(&customer_id);
                             rq.respond_with_int(ticket_id);
                         }
@@ -301,12 +301,12 @@ impl Server {
                 rq.set_server_id(self.id);
                 if let Some(ticket_id) = rq.read_u32() {
                     let customer_id = rq.customer_id();
-                    if let Some(reservation) = reservations.get(&customer_id) {
+                    if let Some(reservation) = self.reservations.lock().unwrap().get(&customer_id) {
                         if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
                             // Abort the purchase and return the ticket to the available pool
-                            reservations.remove(&customer_id);
+                            self.reservations.lock().unwrap().remove(&customer_id);
                             let mut available_tickets = self.available_tickets.lock().unwrap();
                             available_tickets.push_back(ticket_id);
                             rq.respond_with_int(ticket_id);
@@ -394,4 +394,3 @@ impl Server {
         }
     }
 }
-

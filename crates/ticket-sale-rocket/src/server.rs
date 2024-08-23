@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use super::database::Database;
 use crate::util::{ServerMessage, ServerOrRequestMessage, ServerState};
+
 /// Represents a server that handles ticket sales.
 pub struct Server {
     /// Unique identifier for the server.
@@ -41,7 +42,7 @@ struct Reservation {
 }
 
 impl Reservation {
-    /// Creates a new `Reservation` instance with the current timestamp.
+    /// Creates a new Reservation instance with the current timestamp.
     #[inline]
     fn new(ticket: u32) -> Self {
         Self {
@@ -49,24 +50,10 @@ impl Reservation {
             timestamp: Instant::now(),
         }
     }
-
-    /// Returns the age of the ticket.
-    ///
-    /// # Arguments
-    ///
-    /// * `self` - instance of the ticket.
-    ///
-    /// # Returns
-    ///
-    /// * `age` - in seconds.
-    #[inline]
-    fn age_secs(&self) -> u64 {
-        self.timestamp.elapsed().as_secs()
-    }
 }
 
 impl Server {
-    /// Creates a new `Server` instance.
+    /// Creates a new Server instance.
     pub fn new(
         database: Arc<RwLock<Database>>,
         ticket_count: u32,
@@ -95,6 +82,7 @@ impl Server {
     }
 
     pub fn run(&mut self) {
+        self.clean_up_tickets();
         self.handle_messages();
     }
 
@@ -105,6 +93,10 @@ impl Server {
     /// Handles incoming messages based on their priority.
     pub fn handle_messages(&mut self) {
         loop {
+            // Remove expired reservations
+            self.remove_expired_reservations();
+
+            // Process incoming messages
             let message = {
                 let receiver = self.receiver.lock().unwrap();
                 receiver.recv()
@@ -154,7 +146,7 @@ impl Server {
                 return;
             }
         }
-        self.clear_expired_reservations();
+
         match rq.kind() {
             RequestKind::NumAvailableTickets => {
                 let estimate = *self.last_estimate.lock().unwrap();
@@ -194,8 +186,7 @@ impl Server {
                 rq.set_server_id(self.id);
                 if let Some(ticket_id) = rq.read_u32() {
                     let customer_id = rq.customer_id();
-                    let mut reservations: std::sync::MutexGuard<HashMap<Uuid, Reservation>> =
-                        self.reservations.lock().unwrap();
+                    let mut reservations = self.reservations.lock().unwrap();
 
                     if let Some(reservation) = reservations.get(&customer_id) {
                         if ticket_id != reservation.ticket {
@@ -270,7 +261,6 @@ impl Server {
         mut rq: Request,
         available_server: Option<Uuid>,
     ) {
-        self.clear_expired_reservations();
         let mut reservations = self.reservations.lock().unwrap();
 
         match rq.kind() {
@@ -333,9 +323,12 @@ impl Server {
             *state = ServerState::Terminating;
         }
         while !self.can_safely_stop() {
+            // Remove expired reservations while terminating
+            self.remove_expired_reservations();
+
             let message = {
                 let receiver = self.receiver.lock().unwrap();
-                receiver.recv_timeout(Duration::from_millis(50)) // Fixed non-blocking
+                receiver.recv_timeout(Duration::from_millis(50))
             };
 
             if let Ok(message) = message {
@@ -362,21 +355,6 @@ impl Server {
         }
     }
 
-    /// Aborts and removes expired reservations.
-    fn clear_expired_reservations(&mut self) {
-        let mut reservations = self.reservations.lock().unwrap();
-        let mut available_tickets = self.available_tickets.lock().unwrap();
-
-        reservations.retain(|_, res| {
-            if res.age_secs() > self.reservation_timeout.as_secs() {
-                available_tickets.push_back(res.ticket);
-                false
-            } else {
-                true
-            }
-        });
-    }
-
     pub fn clean_up_tickets(&mut self) {
         let mut available_tickets = self.available_tickets.lock().unwrap();
 
@@ -388,5 +366,14 @@ impl Server {
             let mut db = self.database.write().unwrap();
             db.deallocate(&tickets_to_return);
         }
+    }
+
+    fn remove_expired_reservations(&self) {
+        let now = Instant::now();
+        let mut reservations = self.reservations.lock().unwrap();
+
+        reservations.retain(|_, reservation| {
+            now.duration_since(reservation.timestamp) < self.reservation_timeout
+        });
     }
 }

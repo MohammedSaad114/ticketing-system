@@ -371,9 +371,26 @@ impl Server {
     fn remove_expired_reservations(&self) {
         let now = Instant::now();
         let mut reservations = self.reservations.lock().unwrap();
+        let mut available_tickets = self.available_tickets.lock().unwrap();
 
-        reservations.retain(|_, reservation| {
-            now.duration_since(reservation.timestamp) < self.reservation_timeout
-        });
+        // Collect tickets from expired reservations to return them to the available list
+        let expired_tickets: Vec<u32> = reservations
+            .iter()
+            .filter_map(|(_, reservation)| {
+                if now.duration_since(reservation.timestamp) >= self.reservation_timeout {
+                    Some(reservation.ticket)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Remove expired reservations from the map
+        for ticket in &expired_tickets {
+            reservations.retain(|_, reservation| reservation.ticket != *ticket);
+        }
+
+        // Add the expired tickets back to the available tickets list
+        available_tickets.extend(expired_tickets);
     }
 }

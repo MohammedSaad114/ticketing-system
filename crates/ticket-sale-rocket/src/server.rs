@@ -123,10 +123,6 @@ impl Server {
                     }
                 }
             }
-            // Check if we need to terminate or stop
-            if *self.server_state.lock().unwrap() != ServerState::Running {
-                break;
-            }
         }
     }
 

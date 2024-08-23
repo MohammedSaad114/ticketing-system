@@ -63,7 +63,6 @@ impl Coordinator {
             reservation_timeout: config.timeout,
         }
     }
-
     /// Spawns a new server in a separate thread.
     ///
     /// # Arguments
@@ -108,21 +107,18 @@ impl Coordinator {
         {
             let mut servers = self.servers.write().unwrap();
 
-            // Filter out the servers that are currently running or terminating.
-            let active_servers_count = servers
+            // Filter out the servers that are currently running.
+            let running_servers_count = servers
                 .values()
                 .filter(|(_, server_state, _)| {
-                    matches!(
-                        *server_state.lock().unwrap(),
-                        ServerState::Running | ServerState::Terminating
-                    )
+                    matches!(*server_state.lock().unwrap(), ServerState::Running)
                 })
                 .count();
 
-            match num_servers.cmp(&active_servers_count) {
+            match num_servers.cmp(&running_servers_count) {
                 std::cmp::Ordering::Greater => {
                     // Increase the number of servers.
-                    for _ in active_servers_count..num_servers {
+                    for _ in running_servers_count..num_servers {
                         let (server, sender, server_state, handle) =
                             Self::spawn_server(self.database.clone(), self.reservation_timeout);
 
@@ -132,14 +128,11 @@ impl Coordinator {
                 }
                 std::cmp::Ordering::Less => {
                     // Collect servers that need to terminate by finding the first `num_servers`
-                    // servers in a running or terminating state.
+                    // servers in a running state.
                     servers_to_terminate = servers
                         .iter()
                         .filter_map(|(server_id, (_, server_state, _))| {
-                            if matches!(
-                                *server_state.lock().unwrap(),
-                                ServerState::Running | ServerState::Terminating
-                            ) {
+                            if matches!(*server_state.lock().unwrap(), ServerState::Running) {
                                 Some(*server_id)
                             } else {
                                 None
@@ -149,7 +142,7 @@ impl Coordinator {
                         .collect();
                 }
                 std::cmp::Ordering::Equal => {
-                    // No change needed if the number of active servers is already correct.
+                    // No change needed if the number of running servers is already correct.
                     return;
                 }
             }
@@ -180,43 +173,36 @@ impl Coordinator {
         }
     }
 
-    /// Retrieves a list of all server IDs including terminating servers.
-    ///
-    /// # Returns
-    ///
-    /// * Vec<Uuid> - List of server IDs.
-    fn get_all_servers(&self) -> Vec<Uuid> {
-        let servers = self.servers.read().unwrap();
-        servers.keys().cloned().collect()
-    }
+    /*
+    fn get_available_server(&self, server_id: Uuid) -> Option<Uuid> {
+        // return an id of a running server that is not the same as the server_id
+        let servers = self.servers.write().unwrap();
+        let server_ids: Vec<Uuid> = servers.keys().cloned().collect();
+        server_ids.into_iter().find(|&id| id != server_id)
+    }*/
 
-    /// Retrieves a list of all server IDs of servers that are running or terminating.
+    /// Retrieves a list of all server IDs of servers that are running.
     ///
     /// # Returns
     ///
     /// * Vec<Uuid> - List of server IDs.
-    fn get_active_servers(&self) -> Vec<Uuid> {
+ fn get_running_servers(&self) -> Vec<Uuid> {
         let servers = self.servers.read().unwrap();
-        let mut active_servers = Vec::new();
+        let mut running_servers = Vec::new();
 
         for (server_id, (_, server_state, _)) in servers.iter() {
             let state = server_state.lock().unwrap();
-            if matches!(*state, ServerState::Running | ServerState::Terminating) {
-                active_servers.push(*server_id);
+            if *state == ServerState::Running {
+                running_servers.push(*server_id);
             }
         }
 
-        active_servers
+        running_servers
     }
 
     pub fn get_servers(&self) -> Vec<Uuid> {
-        self.get_all_servers()
+        self.servers.read().unwrap().keys().cloned().collect()
     }
-
-    pub fn get_num_servers(&self) -> u32 {
-        self.get_active_servers().len() as u32
-    }
-
     /// Retrieves the sender for a specific server by its ID.
     ///
     /// # Arguments
@@ -234,14 +220,13 @@ impl Coordinator {
             .get(&server_id)
             .map(|(sender, _, _)| sender.clone())
     }
-
     /// Handles incoming messages and updates the coordinator state accordingly.
     pub fn run(&self, rx: Receiver<CoordinatorMessage>) {
         while self.running.load(Ordering::SeqCst) {
             if let Ok(message) = rx.recv() {
                 match message {
                     CoordinatorMessage::GetNumServers(sender) => {
-                        let num_servers = self.get_num_servers();
+                        let num_servers = self.get_running_servers().len() as u32;
                         sender.send(num_servers).unwrap_or_else(|e| {
                             eprintln!("Failed to send number of servers: {}", e)
                         });
@@ -249,7 +234,7 @@ impl Coordinator {
                     CoordinatorMessage::SetNumServers(num, sender) => {
                         self.set_num_servers(num);
 
-                        let actual_num_servers = self.get_num_servers();
+                        let actual_num_servers = self.get_running_servers().len() as u32;
 
                         sender.send(actual_num_servers).unwrap_or_else(|e| {
                             eprintln!("Failed to send set server response: {}", e)
@@ -257,7 +242,7 @@ impl Coordinator {
                     }
 
                     CoordinatorMessage::GetServers(sender) => {
-                        let server_ids = self.get_all_servers();
+                        let server_ids = self.get_running_servers();
                         sender
                             .send(server_ids)
                             .unwrap_or_else(|e| eprintln!("Failed to send server list: {}", e));
@@ -269,7 +254,7 @@ impl Coordinator {
                         });
                     }
                     CoordinatorMessage::GetRunningAndTerminatingServers(sender) => {
-                        let running_servers = self.get_active_servers();
+                        let running_servers = self.get_running_servers();
                         let terminating_servers = self.get_terminating_servers();
                         sender
                             .send((running_servers, terminating_servers))

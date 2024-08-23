@@ -138,7 +138,7 @@ impl Coordinator {
                                 None
                             }
                         })
-                        .take(running_servers_count - num_servers)
+                        .skip(num_servers)
                         .collect();
                 }
                 std::cmp::Ordering::Equal => {

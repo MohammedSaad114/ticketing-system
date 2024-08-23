@@ -271,6 +271,8 @@ impl Server {
         available_server: Option<Uuid>,
     ) {
         self.clear_expired_reservations();
+        let mut reservations = self.reservations.lock().unwrap();
+
         match rq.kind() {
             RequestKind::ReserveTicket => {
                 // Refuse new reservations since the server is terminating
@@ -281,12 +283,11 @@ impl Server {
                 rq.set_server_id(self.id);
                 if let Some(ticket_id) = rq.read_u32() {
                     let customer_id = rq.customer_id();
-                    if let Some(reservation) = self.reservations.lock().unwrap().get(&customer_id) {
+                    if let Some(reservation) = reservations.get(&customer_id) {
                         if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
                             // Complete the purchase and remove the reservation
-                            let mut reservations = self.reservations.lock().unwrap();
                             reservations.remove(&customer_id);
                             rq.respond_with_int(ticket_id);
                         }
@@ -301,12 +302,12 @@ impl Server {
                 rq.set_server_id(self.id);
                 if let Some(ticket_id) = rq.read_u32() {
                     let customer_id = rq.customer_id();
-                    if let Some(reservation) = self.reservations.lock().unwrap().get(&customer_id) {
+                    if let Some(reservation) = reservations.get(&customer_id) {
                         if ticket_id != reservation.ticket {
                             rq.respond_with_err("Invalid ticket id provided!");
                         } else {
                             // Abort the purchase and return the ticket to the available pool
-                            self.reservations.lock().unwrap().remove(&customer_id);
+                            reservations.remove(&customer_id);
                             let mut available_tickets = self.available_tickets.lock().unwrap();
                             available_tickets.push_back(ticket_id);
                             rq.respond_with_int(ticket_id);
@@ -325,12 +326,13 @@ impl Server {
     }
 
     pub fn terminate(&mut self) {
+        self.clean_up_tickets();
+
         {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::Terminating;
         }
         while !self.can_safely_stop() {
-            self.clear_expired_reservations();
             let message = {
                 let receiver = self.receiver.lock().unwrap();
                 receiver.recv_timeout(Duration::from_millis(50)) // Fixed non-blocking
@@ -354,7 +356,6 @@ impl Server {
             }
         }
 
-        self.clean_up_tickets();
         {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::HasStopped;
@@ -378,14 +379,9 @@ impl Server {
 
     pub fn clean_up_tickets(&mut self) {
         let mut available_tickets = self.available_tickets.lock().unwrap();
-        let mut reservations = self.reservations.lock().unwrap();
 
-        // Collect all tickets that are available and those that are reserved.
-        let mut tickets_to_return: Vec<u32> = available_tickets.drain(..).collect();
-
-        for (_, reservation) in reservations.drain() {
-            tickets_to_return.push(reservation.ticket);
-        }
+        // Collect all tickets that are available
+        let tickets_to_return: Vec<u32> = available_tickets.drain(..).collect();
 
         // Return all collected tickets to the central database.
         if !tickets_to_return.is_empty() {

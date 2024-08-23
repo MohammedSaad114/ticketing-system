@@ -186,7 +186,7 @@ impl Coordinator {
     /// # Returns
     ///
     /// * Vec<Uuid> - List of server IDs.
- fn get_running_servers(&self) -> Vec<Uuid> {
+    fn get_running_servers(&self) -> Vec<Uuid> {
         let servers = self.servers.read().unwrap();
         let mut running_servers = Vec::new();
 
@@ -242,7 +242,7 @@ impl Coordinator {
                     }
 
                     CoordinatorMessage::GetServers(sender) => {
-                        let server_ids = self.get_running_servers();
+                        let server_ids = self.get_combined_running_and_terminating_servers();
                         sender
                             .send(server_ids)
                             .unwrap_or_else(|e| eprintln!("Failed to send server list: {}", e));
@@ -276,6 +276,20 @@ impl Coordinator {
                 eprintln!("Coordinator failed to receive message.");
             }
         }
+    }
+
+    fn get_combined_running_and_terminating_servers(&self) -> Vec<Uuid> {
+        let mut combined_servers = Vec::new();
+
+        // Retrieve terminating servers
+        let terminating_servers = self.get_terminating_servers();
+        combined_servers.extend(terminating_servers);
+
+        // Retrieve running servers
+        let running_servers = self.get_running_servers();
+        combined_servers.extend(running_servers);
+
+        combined_servers
     }
 
     fn get_terminating_servers(&self) -> Vec<Uuid> {
@@ -365,4 +379,3 @@ impl Coordinator {
         println!("Coordinator has been fully shut down");
     }
 }
-

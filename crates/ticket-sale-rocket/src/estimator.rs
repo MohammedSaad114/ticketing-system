@@ -3,7 +3,7 @@ use std::sync::{mpsc::channel, Arc, Condvar, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::messages::{ServerMessage, ServerOrRequestMessage};
+use crate::util::{ServerMessage, ServerOrRequestMessage};
 use crate::{Coordinator, Database};
 
 /// The `Estimator` is responsible for estimating and updating the resource availability

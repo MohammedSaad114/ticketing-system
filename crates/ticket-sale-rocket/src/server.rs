@@ -7,8 +7,7 @@ use ticket_sale_core::{Request, RequestKind};
 use uuid::Uuid;
 
 use super::database::Database;
-use crate::coordinator::ServerState;
-use crate::messages::{ServerMessage, ServerOrRequestMessage};
+use crate::util::{ServerMessage, ServerOrRequestMessage, ServerState};
 /// Represents a server that handles ticket sales.
 pub struct Server {
     /// Unique identifier for the server.
@@ -116,11 +115,15 @@ impl Server {
                     ServerOrRequestMessage::ServerMessage(server_message) => {
                         self.handle_server_message(server_message);
                     }
-                    ServerOrRequestMessage::ClientRequest { request } => {
-                        self.handle_request(request);
+                    ServerOrRequestMessage::ClientRequest {
+                        request,
+                        available_server,
+                    } => {
+                        self.handle_request(request, available_server);
                     }
                 }
             }
+            // Check if we need to terminate or stop
             if *self.server_state.lock().unwrap() != ServerState::Running {
                 break;
             }
@@ -145,7 +148,7 @@ impl Server {
     }
 
     /// Handles incoming requests
-    pub fn handle_request(&mut self, mut rq: Request) {
+    pub fn handle_request(&mut self, mut rq: Request, _available_server: Option<Uuid>) {
         {
             let state = self.server_state.lock().unwrap();
             if *state == ServerState::Terminating || *state == ServerState::HasStopped {
@@ -257,7 +260,7 @@ impl Server {
     }
 
     pub fn shutdown(&mut self) {
-        self.return_all_non_reserved_tickets();
+        self.clean_up_tickets();
         {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::HasStopped;
@@ -273,13 +276,18 @@ impl Server {
         reservations_empty
     }
 
-    pub fn handle_request_at_termination(&mut self, mut rq: Request) {
+    pub fn handle_request_at_termination(
+        &mut self,
+        mut rq: Request,
+        available_server: Option<Uuid>,
+    ) {
         self.clear_expired_reservations();
         let mut reservations = self.reservations.lock().unwrap();
 
         match rq.kind() {
             RequestKind::ReserveTicket => {
                 // Refuse new reservations since the server is terminating
+                rq.set_server_id(available_server.unwrap());
                 rq.respond_with_err("Server {} is terminating. Please try server {:?}.");
             }
             RequestKind::BuyTicket => {
@@ -349,7 +357,6 @@ impl Server {
 
         while !self.can_safely_stop() {
             self.clear_expired_reservations();
-
             let message = {
                 let receiver = self.receiver.lock().unwrap();
                 receiver.recv_timeout(Duration::from_millis(50)) // Fixed non-blocking
@@ -360,8 +367,11 @@ impl Server {
                     ServerOrRequestMessage::ServerMessage(server_message) => {
                         self.handle_server_message(server_message);
                     }
-                    ServerOrRequestMessage::ClientRequest { request } => {
-                        self.handle_request_at_termination(request);
+                    ServerOrRequestMessage::ClientRequest {
+                        request,
+                        available_server,
+                    } => {
+                        self.handle_request_at_termination(request, available_server);
                     }
                 }
             } else {
@@ -370,7 +380,7 @@ impl Server {
             }
         }
 
-        self.return_all_non_reserved_tickets();
+        self.clean_up_tickets();
         {
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::HasStopped;
@@ -401,5 +411,28 @@ impl Server {
                 true
             }
         });
+    }
+
+    pub fn clean_up_tickets(&mut self) {
+        let mut available_tickets = self.available_tickets.lock().unwrap();
+        let mut reservations = self.reservations.lock().unwrap();
+
+        // Collect all tickets that are available and those that are reserved.
+        let mut tickets_to_return: Vec<u32> = available_tickets.drain(..).collect();
+
+        for (_, reservation) in reservations.drain() {
+            tickets_to_return.push(reservation.ticket);
+        }
+
+        // Return all collected tickets to the central database.
+        if !tickets_to_return.is_empty() {
+            let mut db = self.database.write().unwrap();
+            db.deallocate(&tickets_to_return);
+            println!(
+                "Server {} returned {} tickets to the database.",
+                self.id,
+                tickets_to_return.len()
+            );
+        }
     }
 }

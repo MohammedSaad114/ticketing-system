@@ -114,7 +114,7 @@ impl Coordinator {
             server_state.clone(),
         )));
 
-        let server_clone = Arc::clone(&server);
+        let server_clone: Arc<RwLock<Server>> = Arc::clone(&server);
         let handle = thread::spawn(move || {
             let mut server = server_clone.write().unwrap();
             server.run();

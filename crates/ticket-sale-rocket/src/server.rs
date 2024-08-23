@@ -281,7 +281,9 @@ impl Server {
             RequestKind::ReserveTicket => {
                 // Refuse new reservations since the server is terminating
                 rq.set_server_id(available_server.unwrap());
-                rq.respond_with_err("Server {} is terminating. Please try server {:?}.");
+                rq.respond_with_err(
+                    "Server is terminating. Please try another server.",
+                );
             }
             RequestKind::BuyTicket => {
                 rq.set_server_id(self.id);

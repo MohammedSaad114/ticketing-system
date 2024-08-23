@@ -77,14 +77,22 @@ impl Balancer {
                 }
 
                 if let Some(server_id) = current_server_id {
-                    if running_servers.contains(&server_id)
-                        || terminating_servers.contains(&server_id)
-                    {
-                        // Server is valid, return it with an available server from the running
-                        // list.
+                    if running_servers.contains(&server_id) {
+                        // Server is valid, return it with an available server from the running list.
                         let available_server =
                             running_servers.iter().cloned().find(|&id| id != server_id);
                         return Some((server_id, available_server));
+                    } else if terminating_servers.contains(&server_id) {
+                        // If the server is terminating, redirect to another running server
+                        let server_count = running_servers.len();
+                        let index =
+                            self.round_robin_index.fetch_add(1, Ordering::SeqCst) % server_count;
+                        let new_server_id = running_servers[index];
+                        let available_server = running_servers
+                            .iter()
+                            .cloned()
+                            .find(|&id| id != new_server_id);
+                        return Some((new_server_id, available_server));
                     } else {
                         // Server is not valid, assign a new server ID from the running servers.
                         let server_count = running_servers.len();

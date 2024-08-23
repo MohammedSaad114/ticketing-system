@@ -264,6 +264,11 @@ impl Server {
         let mut reservations = self.reservations.lock().unwrap();
 
         match rq.kind() {
+            RequestKind::NumAvailableTickets => {
+                let estimate = *self.last_estimate.lock().unwrap();
+                rq.respond_with_int(estimate);
+            }
+            
             RequestKind::ReserveTicket => {
                 // Refuse new reservations since the server is terminating
                 rq.set_server_id(available_server.unwrap());

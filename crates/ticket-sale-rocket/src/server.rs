@@ -270,7 +270,6 @@ impl Server {
         mut rq: Request,
         available_server: Option<Uuid>,
     ) {
-        self.clear_expired_reservations();
         let mut reservations = self.reservations.lock().unwrap();
 
         match rq.kind() {

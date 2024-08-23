@@ -350,6 +350,7 @@ impl Server {
         }
 
         {
+            self.clean_up_tickets();
             let mut state = self.server_state.lock().unwrap();
             *state = ServerState::HasStopped;
         }

@@ -1,6 +1,6 @@
 # Selling Tickets Online (Swiftly)
 
-Template for the Concurrent Programming project 2024 🚀
+University project 2024 🚀
 
 
 ## Structure
